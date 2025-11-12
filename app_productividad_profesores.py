@@ -22,7 +22,7 @@ ACTIVIDADES_PLANTILLAS = [
 ]
 TIPOS_CONTACTO = ["Presencial", "Virtual", "Telefónico", "Otro"]
 
-# Usuarios demo (roles)
+# Usuarios de ejemplo (roles)
 USERS = {
     "admin": {"password": "admin123", "role": "admin"},
     "pro": {"password": "pro123", "role": "profesional"},
@@ -62,12 +62,9 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "zona_geografica": "zona",
     }
     df = df.rename(columns={c: synonyms.get(c, c) for c in df.columns})
-
-    # Combinar nombres+apellidos si falta 'nombre'
-    cols = set(df.columns)
-    if "nombre" not in cols and ("nombres" in cols or "apellidos" in cols):
-        n = df["nombres"].astype(str) if "nombres" in cols else ""
-        a = df["apellidos"].astype(str) if "apellidos" in cols else ""
+    if "nombre" not in df.columns and ("nombres" in df.columns or "apellidos" in df.columns):
+        n = df["nombres"].astype(str) if "nombres" in df.columns else ""
+        a = df["apellidos"].astype(str) if "apellidos" in df.columns else ""
         df["nombre"] = (n.fillna("") + " " + a.fillna("")).str.strip().replace("", pd.NA)
 
     for key_col in ("documento", "nombre"):
@@ -97,7 +94,6 @@ def read_table_upload(uploaded_file) -> pd.DataFrame:
         for sep in seps:
             try:
                 df = pd.read_csv(io.BytesIO(raw), encoding=enc, sep=sep, engine="python")
-                # Si solo 1 columna, reintenta con ';'
                 if df.shape[1] == 1 and sep is None:
                     try:
                         df2 = pd.read_csv(io.BytesIO(raw), encoding=enc, sep=";", engine="python")
@@ -109,7 +105,6 @@ def read_table_upload(uploaded_file) -> pd.DataFrame:
             except Exception as e:
                 last_err = e
 
-    # Recurso final: decodificar cp1252 reemplazando
     try:
         txt = raw.decode("cp1252", errors="replace")
         df = pd.read_csv(io.StringIO(txt), sep=None, engine="python")
@@ -752,7 +747,7 @@ def render_login():
     with st.sidebar:
         if st.session_state.user:
             st.success(f"Sesión: {st.session_state.user} ({st.session_state.role})")
-            if st.button("Cerrar sesión", key="btn_logout", use_container_width=True):
+            if st.button("Cerrar sesión", key="login_logout", use_container_width=True):
                 st.session_state.user = None
                 st.session_state.role = None
                 st.rerun()
@@ -760,7 +755,7 @@ def render_login():
             st.markdown("### Iniciar sesión")
             u = st.text_input("Usuario", key="login_user")
             p = st.text_input("Contraseña", type="password", key="login_pass")
-            if st.button("Ingresar", key="btn_login", use_container_width=True):
+            if st.button("Ingresar", key="login_btn", use_container_width=True):
                 user = USERS.get(u)
                 if user and p == user["password"]:
                     st.session_state.user = u
@@ -774,11 +769,11 @@ def render_login():
 def ui_cargar_datos(auth_user: Optional[str]):
     st.subheader("Registrar atención / paciente")
 
-    # ---------- helper para claves únicas ----------
+    # helper para claves únicas en esta pantalla
     def K(x: str) -> str:
         return f"reg_{x}"
 
-    # ---------- inicializar estado de campos paciente ----------
+    # inicializar estado para autocompletado
     defaults = {
         K("pac_nombre"): "",
         K("pac_fecha_nac"): "",
@@ -797,7 +792,7 @@ def ui_cargar_datos(auth_user: Optional[str]):
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # ---------- selección de programa / convenio / profesional ----------
+    # Selección programa/convenio/profesional
     c1, c2 = st.columns([1.4, 1.4])
     progs = DATA.list_programas()
     prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
@@ -814,7 +809,7 @@ def ui_cargar_datos(auth_user: Optional[str]):
     fsel = c2.selectbox("Profesional", options=list(prof_map.keys()) if prof_map else [], key=K("form_profesional"))
     fid = prof_map.get(fsel)
 
-    # ---------- ubicación e institución ----------
+    # Ubicación e institución
     instituciones = DATA.list_instituciones()
     institucion_id = None
     localidad_val = municipio_val = departamento_val = None
@@ -846,17 +841,17 @@ def ui_cargar_datos(auth_user: Optional[str]):
             municipio_val = row.get("municipio")
             departamento_val = row.get("departamento")
 
-    # ---------- fecha y actividad ----------
+    # Fecha y actividad
     c3, c4 = st.columns([1, 1])
     fecha = c3.date_input("Fecha de la atención", value=date.today(), key=K("fecha"))
     actividad = c4.selectbox("Actividad / plantilla", ACTIVIDADES_PLANTILLAS, key=K("actividad"))
 
-    # ---------- AUTORELLENO PACIENTE ----------
+    # ---------------- AUTORELLENO PACIENTE ----------------
     st.markdown("#### Datos del paciente")
 
     # Documento + buscar
     p1, p2 = st.columns([1, 1])
-    pac_doc = p1.text_input("Documento del paciente (cédula)", key=K("pac_doc"))
+    p1.text_input("Documento del paciente (cédula)", key=K("pac_doc"))
     if p2.button("Buscar paciente por documento", key=K("btn_buscar_paciente")):
         try:
             doc_trim = (st.session_state[K("pac_doc")] or "").strip()
@@ -873,65 +868,64 @@ def ui_cargar_datos(auth_user: Optional[str]):
                 st.session_state[K("pac_municipio")] = pac.get("municipio", "") or ""
                 st.session_state[K("pac_departamento")] = pac.get("departamento", "") or ""
                 st.session_state[K("pac_zona")] = pac.get("zona") if pac.get("zona") in ["Urbana", "Rural"] else "(No especifica)"
-                st.toast("Paciente encontrado. Campos autocompletados.", icon="✅")
+                success_toast("Paciente encontrado. Campos autocompletados.")
                 st.rerun()
             else:
                 st.session_state[K("pac_id_actual")] = None
-                st.toast("No se encontró paciente. Diligencia y se creará.", icon="⚠️")
+                warn_toast("No se encontró paciente. Diligencia y se creará.")
         except Exception as e:
-            st.toast(f"Error buscando paciente: {e}", icon="❌")
+            error_toast(f"Error buscando paciente: {e}")
 
-    # Widgets (sin 'value', se alimentan de session_state)
+    # Widgets (sin 'value', se alimentan de session_state por key)
     p3, p4 = st.columns([1.5, 1])
-    pac_nombre = p3.text_input("Nombre completo del paciente", key=K("pac_nombre"))
+    p3.text_input("Nombre completo del paciente", key=K("pac_nombre"))
     sexo_opts = ["(No especifica)", "F", "M", "Otro"]
-    pac_sexo = p4.selectbox("Sexo (opcional)", options=sexo_opts, key=K("pac_sexo"))
+    st.session_state.setdefault(K("pac_sexo"), "(No especifica)")
+    p4.selectbox("Sexo (opcional)", options=sexo_opts, key=K("pac_sexo"))
 
     p5, p6 = st.columns([1, 1])
-    pac_fecha_nac = p5.text_input("Fecha de nacimiento (AAAA-MM-DD, opcional)", key=K("pac_fecha_nac"))
-    pac_telefono = p6.text_input("Teléfono (opcional)", key=K("pac_telefono"))
+    p5.text_input("Fecha de nacimiento (AAAA-MM-DD, opcional)", key=K("pac_fecha_nac"))
+    p6.text_input("Teléfono (opcional)", key=K("pac_telefono"))
 
     p7, p8 = st.columns([1, 1])
-    pac_email = p7.text_input("Email (opcional)", key=K("pac_email"))
-    pac_direccion = p8.text_input("Dirección (opcional)", key=K("pac_direccion"))
+    p7.text_input("Email (opcional)", key=K("pac_email"))
+    p8.text_input("Dirección (opcional)", key=K("pac_direccion"))
 
     p9, p10, p11 = st.columns([1, 1, 1])
-    pac_loc = p9.text_input("Localidad paciente (opcional)", key=K("pac_localidad"))
-    pac_mun = p10.text_input("Municipio paciente (opcional)", key=K("pac_municipio"))
-    pac_dep = p11.text_input("Departamento paciente (opcional)", key=K("pac_departamento"))
+    p9.text_input("Localidad paciente (opcional)", key=K("pac_localidad"))
+    p10.text_input("Municipio paciente (opcional)", key=K("pac_municipio"))
+    p11.text_input("Departamento paciente (opcional)", key=K("pac_departamento"))
 
     zcol, _ = st.columns([1, 3])
     zona_opts = ["(No especifica)", "Urbana", "Rural"]
-    pac_zona = zcol.selectbox("Zona (Rural/Urbana)", options=zona_opts, key=K("pac_zona"))
+    st.session_state.setdefault(K("pac_zona"), "(No especifica)")
+    zcol.selectbox("Zona (Rural/Urbana)", options=zona_opts, key=K("pac_zona"))
 
     # Estado de atención
     c9, c10 = st.columns([1, 1])
-    atendido_flag = c9.radio("¿Atendido?", ["No", "Sí"], index=1, horizontal=True, key=K("atendido"))
-    registrado_panacea = c10.checkbox("Ya registrado en Panacea", key=K("reg_panacea"))
+    c9.radio("¿Atendido?", ["No", "Sí"], index=1, horizontal=True, key=K("atendido"))
+    c10.checkbox("Ya registrado en Panacea", key=K("reg_panacea"))
 
     c11, c12 = st.columns([1, 1])
-    tipo_contacto = c11.selectbox("Tipo de contacto", options=["(No especifica)"] + TIPOS_CONTACTO, key=K("tipo_contacto"))
-    duracion_minutos = c12.number_input("Duración de la atención (minutos, opcional)", min_value=0, max_value=480, step=5, key=K("duracion_minutos"))
-    dur_val = int(duracion_minutos) if duracion_minutos and duracion_minutos > 0 else None
-    tipo_contacto_val = None if tipo_contacto == "(No especifica)" else tipo_contacto
+    c11.selectbox("Tipo de contacto", options=["(No especifica)"] + TIPOS_CONTACTO, key=K("tipo_contacto"))
+    c12.number_input("Duración de la atención (minutos, opcional)", min_value=0, max_value=480, step=5, key=K("duracion_minutos"))
 
     observaciones = st.text_area("Observaciones", key=K("observaciones"))
 
     # Guardar
-    btn_guardar = st.button(
-        "Guardar atención",
-        type="primary",
-        use_container_width=True,
-        key=K("btn_guardar_atencion"),
-        disabled=not all([pid, cid, fid, institucion_id]),
-    )
-    if btn_guardar:
+    if st.button("Guardar atención", type="primary", use_container_width=True, key=K("btn_guardar_atencion"),
+                 disabled=not all([pid, cid, fid, institucion_id])):
         if not st.session_state[K("pac_doc")] or not st.session_state[K("pac_nombre")]:
-            st.toast("Documento y nombre del paciente son obligatorios.", icon="⚠️")
+            warn_toast("Documento y nombre del paciente son obligatorios.")
         else:
             try:
+                dur = st.session_state.get(K("duracion_minutos")) or 0
+                dur_val = int(dur) if dur and dur > 0 else None
+                tc = st.session_state.get(K("tipo_contacto"))
+                tipo_contacto_val = None if tc == "(No especifica)" else tc
                 sexo_val = None if st.session_state[K("pac_sexo")] == "(No especifica)" else st.session_state[K("pac_sexo")]
                 zona_val = None if st.session_state[K("pac_zona")] == "(No especifica)" else st.session_state[K("pac_zona")]
+
                 pac_id = DATA.upsert_paciente(
                     numero_documento=(st.session_state[K("pac_doc")] or "").strip(),
                     nombre=(st.session_state[K("pac_nombre")] or "").strip(),
@@ -945,8 +939,9 @@ def ui_cargar_datos(auth_user: Optional[str]):
                     departamento=(st.session_state[K("pac_departamento")] or None),
                     zona=zona_val,
                 )
+
                 DATA.insert_registro(
-                    fecha=fecha,
+                    fecha=st.session_state[K("fecha")],
                     programa_id=int(pid),
                     convenio_id=int(cid),
                     institucion_id=int(institucion_id),
@@ -957,194 +952,9 @@ def ui_cargar_datos(auth_user: Optional[str]):
                     departamento=departamento_val,
                     numero_paciente=(st.session_state[K("pac_doc")] or "").strip(),
                     nombre_paciente=(st.session_state[K("pac_nombre")] or "").strip(),
-                    actividad=actividad,
+                    actividad=st.session_state[K("actividad")],
                     atendido=True if st.session_state[K("atendido")] == "Sí" else False,
                     registrado_panacea=bool(st.session_state[K("reg_panacea")]),
-                    duracion_minutos=dur_val,
-                    tipo_contacto=tipo_contacto_val,
-                    observaciones=observaciones,
-                    creado_por=auth_user,
-                )
-                st.toast("Atención registrada.", icon="✅")
-                st.rerun()
-            except Exception as e:
-                st.toast(f"Error al guardar: {e}", icon="❌")
-
-    # Widgets con claves que acabamos de llenar
-    p3, p4 = st.columns([1.5, 1])
-    pac_nombre = p3.text_input("Nombre completo del paciente", key="pac_nombre_input")
-    sexo_opts = ["(No especifica)", "F", "M", "Otro"]
-    pac_sexo = p4.selectbox("Sexo (opcional)", options=sexo_opts, key="pac_sexo_sel")
-
-    p5, p6 = st.columns([1, 1])
-    pac_fecha_nac = p5.text_input("Fecha de nacimiento (AAAA-MM-DD, opcional)", key="pac_fecha_nac_input")
-    pac_telefono = p6.text_input("Teléfono (opcional)", key="pac_telefono_input")
-
-    p7, p8 = st.columns([1, 1])
-    pac_email = p7.text_input("Email (opcional)", key="pac_email_input")
-    pac_direccion = p8.text_input("Dirección (opcional)", key="pac_direccion_input")
-
-    p9, p10, p11 = st.columns([1, 1, 1])
-    pac_loc = p9.text_input("Localidad paciente (opcional)", key="pac_localidad_input")
-    pac_mun = p10.text_input("Municipio paciente (opcional)", key="pac_municipio_input")
-    pac_dep = p11.text_input("Departamento paciente (opcional)", key="pac_departamento_input")
-
-    zcol, _ = st.columns([1, 3])
-    zona_opts = ["(No especifica)", "Urbana", "Rural"]
-    pac_zona = zcol.selectbox("Zona (Rural/Urbana)", options=zona_opts, key="pac_zona_sel")
-
-    # Estado de atención
-    c9, c10 = st.columns([1, 1])
-    atendido_flag = c9.radio("¿Atendido?", ["No", "Sí"], index=1, horizontal=True, key="form_atendido")
-    registrado_panacea = c10.checkbox("Ya registrado en Panacea", key="form_reg_panacea")
-
-    c11, c12 = st.columns([1, 1])
-    tipo_contacto = c11.selectbox("Tipo de contacto", options=["(No especifica)"] + TIPOS_CONTACTO, key="form_tipo_contacto")
-    duracion_minutos = c12.number_input("Duración de la atención (minutos, opcional)", min_value=0, max_value=480, step=5, key="form_duracion_minutos")
-    dur_val = int(duracion_minutos) if duracion_minutos > 0 else None
-    tipo_contacto_val = None if tipo_contacto == "(No especifica)" else tipo_contacto
-
-    observaciones = st.text_area("Observaciones", key="form_observaciones")
-
-    # Guardar
-    btn_guardar = st.button(
-        "Guardar atención",
-        type="primary",
-        use_container_width=True,
-        key="btn_guardar_atencion",
-        disabled=not all([pid, cid, fid, institucion_id]),
-    )
-    if btn_guardar:
-        if not pac_doc or not pac_nombre:
-            warn_toast("Documento y nombre del paciente son obligatorios.")
-        else:
-            try:
-                sexo_val = None if pac_sexo == "(No especifica)" else pac_sexo
-                zona_val = None if pac_zona == "(No especifica)" else pac_zona
-                pac_id = DATA.upsert_paciente(
-                    numero_documento=(pac_doc or "").strip(),
-                    nombre=(pac_nombre or "").strip(),
-                    fecha_nacimiento=pac_fecha_nac or None,
-                    sexo=sexo_val,
-                    telefono=pac_telefono or None,
-                    email=pac_email or None,
-                    direccion=pac_direccion or None,
-                    localidad=pac_loc or None,
-                    municipio=pac_mun or None,
-                    departamento=pac_dep or None,
-                    zona=zona_val,
-                )
-                DATA.insert_registro(
-                    fecha=fecha,
-                    programa_id=int(pid),
-                    convenio_id=int(cid),
-                    institucion_id=int(institucion_id),
-                    profesor_id=int(fid),
-                    paciente_id=pac_id,
-                    localidad=localidad_val,
-                    municipio=municipio_val,
-                    departamento=departamento_val,
-                    numero_paciente=(pac_doc or "").strip(),
-                    nombre_paciente=(pac_nombre or "").strip(),
-                    actividad=actividad,
-                    atendido=True if atendido_flag == "Sí" else False,
-                    registrado_panacea=bool(registrado_panacea),
-                    duracion_minutos=dur_val,
-                    tipo_contacto=tipo_contacto_val,
-                    observaciones=observaciones,
-                    creado_por=auth_user,
-                )
-                success_toast("Atención registrada.")
-                st.rerun()
-            except Exception as e:
-                error_toast(f"Error al guardar: {e}")
-
-    p3, p4 = st.columns([1.5, 1])
-    pac_nombre = p3.text_input(
-        "Nombre completo del paciente", value=st.session_state.get("pac_nombre") or "", key="pac_nombre_input"
-    )
-    sexo_opts = ["(No especifica)", "F", "M", "Otro"]
-    sexo_pre = st.session_state.get("pac_sexo") or "(No especifica)"
-    if sexo_pre not in sexo_opts:
-        sexo_pre = "(No especifica)"
-    pac_sexo = p4.selectbox("Sexo (opcional)", options=sexo_opts, index=sexo_opts.index(sexo_pre), key="pac_sexo_sel")
-
-    p5, p6 = st.columns([1, 1])
-    pac_fecha_nac = p5.text_input(
-        "Fecha de nacimiento (AAAA-MM-DD, opcional)", value=st.session_state.get("pac_fecha_nac") or "", key="pac_fecha_nac_input"
-    )
-    pac_telefono = p6.text_input("Teléfono (opcional)", value=st.session_state.get("pac_telefono") or "", key="pac_telefono_input")
-
-    p7, p8 = st.columns([1, 1])
-    pac_email = p7.text_input("Email (opcional)", value=st.session_state.get("pac_email") or "", key="pac_email_input")
-    pac_direccion = p8.text_input("Dirección (opcional)", value=st.session_state.get("pac_direccion") or "", key="pac_direccion_input")
-
-    p9, p10, p11 = st.columns([1, 1, 1])
-    pac_loc = p9.text_input("Localidad paciente (opcional)", value=st.session_state.get("pac_localidad") or "", key="pac_localidad_input")
-    pac_mun = p10.text_input("Municipio paciente (opcional)", value=st.session_state.get("pac_municipio") or "", key="pac_municipio_input")
-    pac_dep = p11.text_input("Departamento paciente (opcional)", value=st.session_state.get("pac_departamento") or "", key="pac_departamento_input")
-
-    zcol, _ = st.columns([1, 3])
-    zona_opts = ["(No especifica)", "Urbana", "Rural"]
-    zona_pre = st.session_state.get("pac_zona") or "(No especifica)"
-    if zona_pre not in zona_opts:
-        zona_pre = "(No especifica)"
-    pac_zona = zcol.selectbox("Zona (Rural/Urbana)", options=zona_opts, index=zona_opts.index(zona_pre), key="pac_zona_sel")
-
-    c9, c10 = st.columns([1, 1])
-    atendido_flag = c9.radio("¿Atendido?", ["No", "Sí"], index=1, horizontal=True, key="form_atendido")
-    registrado_panacea = c10.checkbox("Ya registrado en Panacea", key="form_reg_panacea")
-
-    c11, c12 = st.columns([1, 1])
-    tipo_contacto = c11.selectbox("Tipo de contacto", options=["(No especifica)"] + TIPOS_CONTACTO, key="form_tipo_contacto")
-    duracion_minutos = c12.number_input("Duración de la atención (minutos, opcional)", min_value=0, max_value=480, step=5, key="form_duracion_minutos")
-    dur_val = int(duracion_minutos) if duracion_minutos > 0 else None
-    tipo_contacto_val = None if tipo_contacto == "(No especifica)" else tipo_contacto
-
-    observaciones = st.text_area("Observaciones", key="form_observaciones")
-
-    btn_guardar = st.button(
-        "Guardar atención",
-        type="primary",
-        use_container_width=True,
-        key="btn_guardar_atencion",
-        disabled=not all([pid, cid, fid, institucion_id]),
-    )
-    if btn_guardar:
-        if not pac_doc or not pac_nombre:
-            warn_toast("Documento y nombre del paciente son obligatorios.")
-        else:
-            try:
-                sexo_val = None if pac_sexo == "(No especifica)" else pac_sexo
-                zona_val = None if pac_zona == "(No especifica)" else pac_zona
-                pac_id = DATA.upsert_paciente(
-                    numero_documento=pac_doc,
-                    nombre=pac_nombre,
-                    fecha_nacimiento=pac_fecha_nac or None,
-                    sexo=sexo_val,
-                    telefono=pac_telefono or None,
-                    email=pac_email or None,
-                    direccion=pac_direccion or None,
-                    localidad=pac_loc or None,
-                    municipio=pac_mun or None,
-                    departamento=pac_dep or None,
-                    zona=zona_val,
-                )
-                DATA.insert_registro(
-                    fecha=fecha,
-                    programa_id=int(pid),
-                    convenio_id=int(cid),
-                    institucion_id=int(institucion_id),
-                    profesor_id=int(fid),
-                    paciente_id=pac_id,
-                    localidad=localidad_val,
-                    municipio=municipio_val,
-                    departamento=departamento_val,
-                    numero_paciente=pac_doc,
-                    nombre_paciente=pac_nombre,
-                    actividad=actividad,
-                    atendido=True if atendido_flag == "Sí" else False,
-                    registrado_panacea=bool(registrado_panacea),
                     duracion_minutos=dur_val,
                     tipo_contacto=tipo_contacto_val,
                     observaciones=observaciones,
@@ -1167,34 +977,17 @@ def ui_registros():
         df["tasa_atencion_%"] = (df["tasa_atencion"] * 100).round(1)
 
     show = [
-        "id",
-        "fecha",
-        "programa",
-        "convenio",
-        "institucion",
-        "profesor",
-        "actividad",
-        "numero_paciente",
-        "nombre_paciente",
-        "tipo_contacto",
-        "duracion_minutos",
-        "atendido",
-        "registrado_panacea",
-        "pacientes_programados",
-        "pacientes_atendidos",
-        "no_asistieron",
-        "tasa_atencion_%",
-        "observaciones",
-        "creado_por",
-        "creado_en",
-        "actualizado_en",
+        "id","fecha","programa","convenio","institucion","profesor","actividad",
+        "numero_paciente","nombre_paciente","tipo_contacto","duracion_minutos",
+        "atendido","registrado_panacea","pacientes_programados","pacientes_atendidos",
+        "no_asistieron","tasa_atencion_%","observaciones","creado_por","creado_en","actualizado_en",
     ]
     st.dataframe(df[[c for c in show if c in df.columns]], use_container_width=True, hide_index=True)
 
     st.markdown("---")
     c1, c2, _ = st.columns([1, 1, 3])
-    rid = c1.number_input("ID de atención", min_value=1, step=1, key="reg_id_sel")
-    if c2.button("Eliminar atención", use_container_width=True, key="btn_eliminar_reg"):
+    rid = c1.number_input("ID de atención", min_value=1, step=1, key="lst_reg_id_sel")
+    if c2.button("Eliminar atención", use_container_width=True, key="lst_btn_eliminar_reg"):
         try:
             DATA.delete_registro(int(rid))
             success_toast("Eliminado.")
@@ -1340,7 +1133,7 @@ def ui_reportes():
         file_name=f"productividad_profesionales_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
-        key="btn_descargar_xlsx",
+        key="rep_btn_descargar_xlsx",
     )
 
     st.download_button(
@@ -1349,7 +1142,7 @@ def ui_reportes():
         file_name=f"productividad_profesionales_detalle_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
         use_container_width=True,
-        key="btn_descargar_csv",
+        key="rep_btn_descargar_csv",
     )
 
 # ---------------- UI: VIATICOS ----------------
@@ -1370,7 +1163,7 @@ def ui_viaticos(auth_user: Optional[str]):
 
     prof = DATA.list_profesores(pid, cid)
     prof_map = {r["nombre"]: int(r["id"]) for _, r in prof.iterrows()} if not prof.empty else {}
-    fsel = c2.selectbox("Profesional (opcional)", options=["(Sin profesional)"] + list(prof_map.keys()), key="via_profesor")
+    fsel = c2.selectbox("Profesional (opcional)", options=["(Sin profesional)"] + list(prof_map.keys()), key="via_profesional")
     fid = prof_map.get(fsel)
 
     inst = DATA.list_instituciones()
@@ -1412,19 +1205,8 @@ def ui_viaticos(auth_user: Optional[str]):
     else:
         df["requiere_viatico"] = df["requiere_viatico"].map({1: "Sí", 0: "No"})
         show = [
-            "id",
-            "fecha",
-            "programa",
-            "convenio",
-            "institucion",
-            "profesor",
-            "requiere_viatico",
-            "origen",
-            "destino",
-            "valor",
-            "observaciones",
-            "creado_por",
-            "creado_en",
+            "id","fecha","programa","convenio","institucion","profesor",
+            "requiere_viatico","origen","destino","valor","observaciones","creado_por","creado_en",
         ]
         st.dataframe(df[[c for c in show if c in df.columns]], use_container_width=True, hide_index=True)
         st.metric("Total viáticos (filtro)", f"${df['valor'].fillna(0).sum():,.0f}".replace(",", "."))
@@ -1480,18 +1262,8 @@ def ui_planificador(auth_user: Optional[str]):
         st.info("Sin eventos.")
     else:
         show = [
-            "id",
-            "fecha",
-            "hora_inicio",
-            "hora_fin",
-            "titulo",
-            "descripcion",
-            "programa",
-            "convenio",
-            "institucion",
-            "profesor",
-            "creado_por",
-            "creado_en",
+            "id","fecha","hora_inicio","hora_fin","titulo","descripcion",
+            "programa","convenio","institucion","profesor","creado_por","creado_en",
         ]
         st.dataframe(df[[c for c in show if c in df.columns]], use_container_width=True, hide_index=True)
 
@@ -1504,7 +1276,7 @@ def ui_configuracion():
     with tabs[0]:
         c1, c2 = st.columns([2, 1])
         pnom = c1.text_input("Nombre del programa", key="cfg_prog_nombre")
-        if c2.button("Agregar programa", use_container_width=True, key="btn_add_programa"):
+        if c2.button("Agregar programa", use_container_width=True, key="cfg_btn_add_programa"):
             if not pnom.strip():
                 warn_toast("Escribe un nombre.")
             else:
@@ -1520,7 +1292,7 @@ def ui_configuracion():
         c1, c2, c3 = st.columns([2, 2, 1])
         cv_prog = c1.selectbox("Programa", options=list(prog_map.keys()) if prog_map else [], key="cfg_conv_prog")
         cv_nom = c2.text_input("Nombre del convenio", key="cfg_conv_nombre")
-        if c3.button("Agregar convenio", use_container_width=True, key="btn_add_convenio"):
+        if c3.button("Agregar convenio", use_container_width=True, key="cfg_btn_add_convenio"):
             if not (cv_prog and cv_nom.strip()):
                 warn_toast("Selecciona programa y nombre.")
             else:
@@ -1536,7 +1308,7 @@ def ui_configuracion():
         i_loc = c2.text_input("Localidad", key="cfg_inst_localidad")
         i_mun = c3.text_input("Municipio", key="cfg_inst_municipio")
         i_dep = c4.text_input("Departamento", key="cfg_inst_departamento")
-        if c5.button("Agregar institución", use_container_width=True, key="btn_add_inst"):
+        if c5.button("Agregar institución", use_container_width=True, key="cfg_btn_add_inst"):
             if not i_nom.strip():
                 warn_toast("Escribe el nombre.")
             else:
@@ -1547,8 +1319,8 @@ def ui_configuracion():
 
         st.markdown("---")
         st.markdown("### Carga masiva de instituciones")
-        file_inst = st.file_uploader("Archivo de instituciones (Excel o CSV)", type=["xlsx", "xls", "csv"], key="up_instituciones")
-        if file_inst is not None and st.button("Procesar instituciones", key="btn_proc_inst"):
+        file_inst = st.file_uploader("Archivo de instituciones (Excel o CSV)", type=["xlsx", "xls", "csv"], key="cfg_up_instituciones")
+        if file_inst is not None and st.button("Procesar instituciones", key="cfg_btn_proc_inst"):
             try:
                 df_inst = read_table_upload(file_inst)
                 if "nombre" not in df_inst.columns:
@@ -1587,7 +1359,7 @@ def ui_configuracion():
         zona_opts = ["(No especifica)", "Urbana", "Rural"]
         f_zona = c6.selectbox("Zona (opcional)", options=zona_opts, key="cfg_prof_zona")
 
-        if st.button("Agregar profesional", use_container_width=True, key="btn_add_prof"):
+        if st.button("Agregar profesional", use_container_width=True, key="cfg_btn_add_prof"):
             if not f_nom.strip():
                 warn_toast("Escribe el nombre.")
             else:
@@ -1603,8 +1375,8 @@ def ui_configuracion():
         st.markdown("---")
         st.markdown("### Carga masiva de profesionales")
         st.caption("Columnas: **nombre** (obligatoria), opcionales: documento, email, programa, convenio, zona (Rural/Urbana).")
-        file_prof = st.file_uploader("Archivo de profesionales", type=["xlsx", "xls", "csv"], key="up_profesionales")
-        if file_prof is not None and st.button("Procesar profesionales", key="btn_proc_prof"):
+        file_prof = st.file_uploader("Archivo de profesionales", type=["xlsx", "xls", "csv"], key="cfg_up_profesionales")
+        if file_prof is not None and st.button("Procesar profesionales", key="cfg_btn_proc_prof"):
             try:
                 df_prof = read_table_upload(file_prof)
                 if "nombre" not in df_prof.columns:
@@ -1662,7 +1434,7 @@ def ui_configuracion():
         zona_opts = ["(No especifica)", "Urbana", "Rural"]
         cfg_zona = zc1.selectbox("Zona (opcional)", zona_opts, key="cfg_pac_zona")
 
-        if st.button("Guardar / actualizar paciente", key="btn_guardar_paciente_cfg"):
+        if st.button("Guardar / actualizar paciente", key="cfg_btn_guardar_paciente"):
             if not cfg_doc.strip() or not cfg_nom.strip():
                 warn_toast("Documento y nombre son obligatorios.")
             else:
@@ -1692,8 +1464,8 @@ def ui_configuracion():
         st.caption(
             "Obligatorias: **documento**, **nombre**. Opcionales: fecha_nacimiento, sexo, telefono, email, direccion, localidad, municipio, departamento, zona (Rural/Urbana)."
         )
-        file_pac = st.file_uploader("Archivo de pacientes (Excel o CSV)", type=["xlsx", "xls", "csv"], key="up_pacientes")
-        if file_pac is not None and st.button("Procesar pacientes", key="btn_proc_pac"):
+        file_pac = st.file_uploader("Archivo de pacientes (Excel o CSV)", type=["xlsx", "xls", "csv"], key="cfg_up_pacientes")
+        if file_pac is not None and st.button("Procesar pacientes", key="cfg_btn_proc_pac"):
             try:
                 df_pac = read_table_upload(file_pac)
                 if not {"documento", "nombre"}.issubset(df_pac.columns):
@@ -1772,5 +1544,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
