@@ -357,7 +357,7 @@ class DataAccess:
                 (nombre.strip(), (localidad or None), (municipio or None), (departamento or None)),
             )
 
-    # Profesores
+    # Profesionales
     def list_profesores(
         self, programa_id: Optional[int] = None, convenio_id: Optional[int] = None
     ) -> pd.DataFrame:
@@ -997,7 +997,7 @@ def ui_registros():
         df["tasa_atencion_%"] = (df["tasa_atencion"] * 100).round(1)
 
     show = [
-        "id","fecha","programa","convenio","institucion","profesor","actividad",
+        "id","fecha","programa","convenio","institucion","profesional","actividad",
         "numero_paciente","nombre_paciente","tipo_contacto","duracion_minutos",
         "atendido","registrado_panacea","pacientes_programados","pacientes_atendidos",
         "no_asistieron","tasa_atencion_%","observaciones","creado_por","creado_en","actualizado_en",
@@ -1564,3 +1564,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
