@@ -1,0 +1,3 @@
+fecha;programa;convenio;institucion;profesional;numero_paciente;nombre_paciente;actividad;atendido;registrado_panacea;tipo_contacto;duracion_minutos
+20/01/2025;Programa 1;Convenio A;COLEGIO DISTRITAL USAQUÉN;Juan Pérez;10000001;Carlos López;VALORACION INICIAL POR PSICOLOGIA;SI;SI;Presencial;60
+21/01/2025;Programa 1;Convenio A;COLEGIO DISTRITAL SUBA;Juan Pérez;10000002;Ana Ruiz;APOYO TERAPEUTICO Y SEGUIMIENTO;SI;NO;Virtual;45
