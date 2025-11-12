@@ -1,4 +1,4 @@
-# app_productividad_profesores.py
+# app_productividad_profesionales.py
 from datetime import datetime, date, time as dtime
 from typing import Optional, Dict, Any, List
 import io
@@ -12,7 +12,7 @@ import streamlit as st
 
 APP_TITLE = "Productividad de Profesionales"
 APP_ICON = "📊"
-DB_SQLITE_PATH = "productividad_profesores.db"
+DB_SQLITE_PATH = "productividad_profesionales.db"
 
 ACTIVIDADES_PLANTILLAS = [
     "VALORACION INICIAL POR PSICOLOGIA",
@@ -165,8 +165,8 @@ SQLITE_DDL = {
         UNIQUE(nombre, municipio, departamento)
     );
     """,
-    "profesores": """
-    CREATE TABLE IF NOT EXISTS profesores(
+    "profesionales": """
+    CREATE TABLE IF NOT EXISTS profesionales(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nombre TEXT NOT NULL,
         documento TEXT,
@@ -203,7 +203,7 @@ SQLITE_DDL = {
         programa_id INTEGER NOT NULL,
         convenio_id INTEGER NOT NULL,
         institucion_id INTEGER NOT NULL,
-        profesor_id INTEGER NOT NULL,
+        profesional_id INTEGER NOT NULL,
         paciente_id INTEGER,
         localidad TEXT,
         municipio TEXT,
@@ -224,7 +224,7 @@ SQLITE_DDL = {
         FOREIGN KEY(programa_id) REFERENCES programas(id),
         FOREIGN KEY(convenio_id) REFERENCES convenios(id),
         FOREIGN KEY(institucion_id) REFERENCES instituciones(id),
-        FOREIGN KEY(profesor_id) REFERENCES profesores(id),
+        FOREIGN KEY(profesional_id) REFERENCES profesionales(id),
         FOREIGN KEY(paciente_id) REFERENCES pacientes(id)
     );
     """,
@@ -235,7 +235,7 @@ SQLITE_DDL = {
         programa_id INTEGER,
         convenio_id INTEGER,
         institucion_id INTEGER,
-        profesor_id INTEGER,
+        profesional_id INTEGER,
         requiere_viatico INTEGER NOT NULL,
         origen TEXT,
         destino TEXT,
@@ -247,7 +247,7 @@ SQLITE_DDL = {
         FOREIGN KEY(programa_id) REFERENCES programas(id),
         FOREIGN KEY(convenio_id) REFERENCES convenios(id),
         FOREIGN KEY(institucion_id) REFERENCES instituciones(id),
-        FOREIGN KEY(profesor_id) REFERENCES profesores(id)
+        FOREIGN KEY(profesional_id) REFERENCES profesionales(id)
     );
     """,
     "agenda": """
@@ -261,14 +261,14 @@ SQLITE_DDL = {
         programa_id INTEGER,
         convenio_id INTEGER,
         institucion_id INTEGER,
-        profesor_id INTEGER,
+        profesional_id INTEGER,
         creado_por TEXT,
         creado_en TEXT,
         actualizado_en TEXT,
         FOREIGN KEY(programa_id) REFERENCES programas(id),
         FOREIGN KEY(convenio_id) REFERENCES convenios(id),
         FOREIGN KEY(institucion_id) REFERENCES instituciones(id),
-        FOREIGN KEY(profesor_id) REFERENCES profesores(id)
+        FOREIGN KEY(profesional_id) REFERENCES profesionales(id)
     );
     """,
 }
@@ -358,10 +358,10 @@ class DataAccess:
             )
 
     # Profesionales
-    def list_profesores(
+    def list_profesionales(
         self, programa_id: Optional[int] = None, convenio_id: Optional[int] = None
     ) -> pd.DataFrame:
-        q = "SELECT * FROM profesores WHERE activo=1"
+        q = "SELECT * FROM profesionales WHERE activo=1"
         p: List[Any] = []
         if programa_id:
             q += " AND programa_id=?"
@@ -372,7 +372,7 @@ class DataAccess:
         q += " ORDER BY nombre"
         return pd.read_sql_query(q, self.db, params=p)
 
-    def upsert_profesor(
+    def upsert_profesional(
         self,
         nombre: str,
         documento: Optional[str],
@@ -385,7 +385,7 @@ class DataAccess:
             return
         with self.db:
             self.db.execute(
-                "INSERT INTO profesores(nombre,documento,email,programa_id,convenio_id,zona,activo) VALUES(?,?,?,?,?,?,1)",
+                "INSERT INTO profesionales(nombre,documento,email,programa_id,convenio_id,zona,activo) VALUES(?,?,?,?,?,?,1)",
                 (nombre.strip(), (documento or None), (email or None), programa_id, convenio_id, zona),
             )
 
@@ -473,7 +473,7 @@ class DataAccess:
         programa_id: int,
         convenio_id: int,
         institucion_id: int,
-        profesor_id: int,
+        profesional_id: int,
         paciente_id: Optional[int],
         localidad,
         municipio,
@@ -493,7 +493,7 @@ class DataAccess:
             "programa_id": programa_id,
             "convenio_id": convenio_id,
             "institucion_id": institucion_id,
-            "profesor_id": profesor_id,
+            "profesional_id": profesional_id,
             "paciente_id": paciente_id,
             "localidad": localidad,
             "municipio": municipio,
@@ -520,12 +520,12 @@ class DataAccess:
     def list_registros(self, filtros: Dict[str, Any]) -> pd.DataFrame:
         q = (
             "SELECT r.*, p.nombre AS programa, c.nombre AS convenio, "
-            "i.nombre AS institucion, f.nombre AS profesor, f.email AS profesor_email "
+            "i.nombre AS institucion, f.nombre AS profesional, f.email AS profesional_email "
             "FROM registros r "
             "LEFT JOIN programas p ON p.id=r.programa_id "
             "LEFT JOIN convenios c ON c.id=r.convenio_id "
             "LEFT JOIN instituciones i ON i.id=r.institucion_id "
-            "LEFT JOIN profesores f ON f.id=r.profesor_id "
+            "LEFT JOIN profesionales f ON f.id=r.profesional_id "
             "WHERE 1=1 "
         )
         params: List[Any] = []
@@ -535,7 +535,7 @@ class DataAccess:
         if filtros.get("fecha_hasta"):
             q += " AND date(r.fecha)<=date(?)"
             params.append(filtros["fecha_hasta"].strftime("%Y-%m-%d"))
-        for k in ["programa_id", "convenio_id", "profesor_id"]:
+        for k in ["programa_id", "convenio_id", "profesional_id"]:
             if filtros.get(k):
                 q += f" AND r.{k}=?"
                 params.append(filtros[k])
@@ -577,7 +577,7 @@ class DataAccess:
         programa_id,
         convenio_id,
         institucion_id,
-        profesor_id,
+        profesional_id,
         requiere_viatico,
         origen,
         destino,
@@ -590,7 +590,7 @@ class DataAccess:
             "programa_id": programa_id,
             "convenio_id": convenio_id,
             "institucion_id": institucion_id,
-            "profesor_id": profesor_id,
+            "profesional_id": profesional_id,
             "requiere_viatico": 1 if requiere_viatico else 0,
             "origen": origen,
             "destino": destino,
@@ -608,12 +608,12 @@ class DataAccess:
     def list_viaticos(self, filtros: Dict[str, Any]) -> pd.DataFrame:
         q = (
             "SELECT v.*, p.nombre AS programa, c.nombre AS convenio, "
-            "i.nombre AS institucion, f.nombre AS profesor "
+            "i.nombre AS institucion, f.nombre AS profesional "
             "FROM viaticos v "
             "LEFT JOIN programas p ON p.id=v.programa_id "
             "LEFT JOIN convenios c ON c.id=v.convenio_id "
             "LEFT JOIN instituciones i ON i.id=v.institucion_id "
-            "LEFT JOIN profesores f ON f.id=v.profesor_id "
+            "LEFT JOIN profesionales f ON f.id=v.profesional_id "
             "WHERE 1=1 "
         )
         params: List[Any] = []
@@ -623,7 +623,7 @@ class DataAccess:
         if filtros.get("fecha_hasta"):
             q += " AND date(v.fecha)<=date(?)"
             params.append(filtros["fecha_hasta"].strftime("%Y-%m-%d"))
-        for k in ["programa_id", "convenio_id", "profesor_id"]:
+        for k in ["programa_id", "convenio_id", "profesional_id"]:
             if filtros.get(k):
                 q += f" AND v.{k}=?"
                 params.append(filtros[k])
@@ -645,7 +645,7 @@ class DataAccess:
         programa_id,
         convenio_id,
         institucion_id,
-        profesor_id,
+        profesional_id,
         creado_por,
     ) -> None:
         row = {
@@ -657,7 +657,7 @@ class DataAccess:
             "programa_id": programa_id,
             "convenio_id": convenio_id,
             "institucion_id": institucion_id,
-            "profesor_id": profesor_id,
+            "profesional_id": profesional_id,
             "creado_por": creado_por,
             "creado_en": _now(),
             "actualizado_en": _now(),
@@ -670,12 +670,12 @@ class DataAccess:
     def list_agenda(self, filtros: Dict[str, Any]) -> pd.DataFrame:
         q = (
             "SELECT a.*, p.nombre AS programa, c.nombre AS convenio, "
-            "i.nombre AS institucion, f.nombre AS profesor "
+            "i.nombre AS institucion, f.nombre AS profesional "
             "FROM agenda a "
             "LEFT JOIN programas p ON p.id=a.programa_id "
             "LEFT JOIN convenios c ON c.id=a.convenio_id "
             "LEFT JOIN instituciones i ON i.id=a.institucion_id "
-            "LEFT JOIN profesores f ON f.id=a.profesor_id "
+            "LEFT JOIN profesionales f ON f.id=a.profesional_id "
             "WHERE 1=1 "
         )
         params: List[Any] = []
@@ -685,7 +685,7 @@ class DataAccess:
         if filtros.get("fecha_hasta"):
             q += " AND date(a.fecha)<=date(?)"
             params.append(filtros["fecha_hasta"].strftime("%Y-%m-%d"))
-        for k in ["programa_id", "convenio_id", "profesor_id"]:
+        for k in ["programa_id", "convenio_id", "profesional_id"]:
             if filtros.get(k):
                 q += f" AND a.{k}=?"
                 params.append(filtros[k])
@@ -727,7 +727,7 @@ def sidebar_filters():
     csel = st.sidebar.selectbox("Convenio", options=["(Todos)"] + list(conv_map.keys()), key="flt_convenio")
     cid = conv_map.get(csel)
 
-    prof = DATA.list_profesores(pid, cid)
+    prof = DATA.list_profesionales(pid, cid)
     prof_map = {r["nombre"]: int(r["id"]) for _, r in prof.iterrows()} if not prof.empty else {}
     fsel = st.sidebar.selectbox("Profesional", options=["(Todos)"] + list(prof_map.keys()), key="flt_profesional")
     fid = prof_map.get(fsel)
@@ -739,7 +739,7 @@ def sidebar_filters():
         "fecha_hasta": fhasta,
         "programa_id": pid,
         "convenio_id": cid,
-        "profesor_id": fid,
+        "profesional_id": fid,
         "actividad": (None if act == "(Todas)" else act),
     }
 
@@ -804,7 +804,7 @@ def ui_cargar_datos(auth_user: Optional[str]):
     csel = c1.selectbox("Convenio", options=list(conv_map.keys()) if conv_map else [], key=K("form_convenio"))
     cid = conv_map.get(csel)
 
-    prof = DATA.list_profesores(pid, cid)
+    prof = DATA.list_profesionales(pid, cid)
     prof_map = {r["nombre"]: int(r["id"]) for _, r in prof.iterrows()} if not prof.empty else {}
     fsel = c2.selectbox("Profesional", options=list(prof_map.keys()) if prof_map else [], key=K("form_profesional"))
     fid = prof_map.get(fsel)
@@ -964,7 +964,7 @@ def ui_cargar_datos(auth_user: Optional[str]):
                     programa_id=int(pid),
                     convenio_id=int(cid),
                     institucion_id=int(institucion_id),
-                    profesor_id=int(fid),
+                    profesional_id=int(fid),
                     paciente_id=pac_id,
                     localidad=localidad_val,
                     municipio=municipio_val,
@@ -997,7 +997,7 @@ def ui_registros():
         df["tasa_atencion_%"] = (df["tasa_atencion"] * 100).round(1)
 
     show = [
-        "id","fecha","programa","convenio","institucion","profesor","actividad",
+        "id","fecha","programa","convenio","institucion","profesional","actividad",
         "numero_paciente","nombre_paciente","tipo_contacto","duracion_minutos",
         "atendido","registrado_panacea","pacientes_programados","pacientes_atendidos",
         "no_asistieron","tasa_atencion_%","observaciones","creado_por","creado_en","actualizado_en",
@@ -1059,19 +1059,19 @@ def ui_dashboard():
     )
 
     rank = (
-        df.groupby("profesor", dropna=True)["pacientes_atendidos"]
+        df.groupby("profesional", dropna=True)["pacientes_atendidos"]
         .sum()
         .sort_values(ascending=False)
         .head(15)
         .reset_index()
     )
-    fig2 = px.bar(rank, x="profesor", y="pacientes_atendidos", title="Top profesionales")
+    fig2 = px.bar(rank, x="profesional", y="pacientes_atendidos", title="Top profesionales")
     fig2.update_layout(xaxis_tickangle=-40)
     st.plotly_chart(fig2, use_container_width=True)
 
     if "registrado_panacea" in df.columns:
         pan = (
-            df.groupby("profesor", dropna=True)
+            df.groupby("profesional", dropna=True)
             .agg(
                 pacientes_atendidos=("pacientes_atendidos", "sum"),
                 cargadas_panacea=("registrado_panacea", "sum"),
@@ -1081,7 +1081,7 @@ def ui_dashboard():
         pan["brecha"] = pan["pacientes_atendidos"] - pan["cargadas_panacea"]
         fig2b = px.bar(
             pan.sort_values("brecha", ascending=False).head(15),
-            x="profesor",
+            x="profesional",
             y=["pacientes_atendidos", "cargadas_panacea"],
             barmode="group",
             title="Atenciones vs Panacea por profesional",
@@ -1113,7 +1113,7 @@ def ui_reportes():
          return
 
     agg_prof = (
-        df.groupby("profesor", dropna=True)
+        df.groupby("profesional", dropna=True)
         .agg(
             pacientes_programados=("pacientes_programados", "sum"),
             pacientes_atendidos=("pacientes_atendidos", "sum"),
@@ -1181,7 +1181,7 @@ def ui_viaticos(auth_user: Optional[str]):
     csel = c1.selectbox("Convenio (opcional)", options=["(Sin convenio)"] + list(conv_map.keys()), key="via_convenio")
     cid = conv_map.get(csel)
 
-    prof = DATA.list_profesores(pid, cid)
+    prof = DATA.list_profesionales(pid, cid)
     prof_map = {r["nombre"]: int(r["id"]) for _, r in prof.iterrows()} if not prof.empty else {}
     fsel = c2.selectbox("Profesional (opcional)", options=["(Sin profesional)"] + list(prof_map.keys()), key="via_profesional")
     fid = prof_map.get(fsel)
@@ -1205,7 +1205,7 @@ def ui_viaticos(auth_user: Optional[str]):
                 programa_id=pid,
                 convenio_id=cid,
                 institucion_id=iid,
-                profesor_id=fid,
+                profesional_id=fid,
                 requiere_viatico=(req == "Sí"),
                 origen=origen,
                 destino=destino,
@@ -1225,7 +1225,7 @@ def ui_viaticos(auth_user: Optional[str]):
     else:
         df["requiere_viatico"] = df["requiere_viatico"].map({1: "Sí", 0: "No"})
         show = [
-            "id","fecha","programa","convenio","institucion","profesor",
+            "id","fecha","programa","convenio","institucion","profesional",
             "requiere_viatico","origen","destino","valor","observaciones","creado_por","creado_en",
         ]
         st.dataframe(df[[c for c in show if c in df.columns]], use_container_width=True, hide_index=True)
@@ -1260,9 +1260,9 @@ def ui_planificador(auth_user: Optional[str]):
     isel = c5.selectbox("Institución (opcional)", options=["(Sin institución)"] + list(inst_map.keys()), key="ag_institucion")
     iid = inst_map.get(isel)
 
-    prof = DATA.list_profesores(pid, cid)
+    prof = DATA.list_profesionales(pid, cid)
     prof_map = {r["nombre"]: int(r["id"]) for _, r in prof.iterrows()} if not prof.empty else {}
-    fsel = c6.selectbox("Profesional (opcional)", options=["(Sin profesional)"] + list(prof_map.keys()), key="ag_profesor")
+    fsel = c6.selectbox("Profesional (opcional)", options=["(Sin profesional)"] + list(prof_map.keys()), key="ag_profesional")
     fid = prof_map.get(fsel)
 
     if st.button("Guardar evento", type="primary", use_container_width=True, key="ag_guardar"):
@@ -1283,7 +1283,7 @@ def ui_planificador(auth_user: Optional[str]):
     else:
         show = [
             "id","fecha","hora_inicio","hora_fin","titulo","descripcion",
-            "programa","convenio","institucion","profesor","creado_por","creado_en",
+            "programa","convenio","institucion","profesional","creado_por","creado_en",
         ]
         st.dataframe(df[[c for c in show if c in df.columns]], use_container_width=True, hide_index=True)
 
@@ -1384,13 +1384,13 @@ def ui_configuracion():
                 warn_toast("Escribe el nombre.")
             else:
                 zona = None if f_zona == "(No especifica)" else f_zona
-                DATA.upsert_profesor(
+                DATA.upsert_profesional(
                     f_nom.strip(), f_doc or None, f_email or None, prog_map.get(f_prog), conv_map.get(f_conv), zona
                 )
                 success_toast("Profesional agregado.")
                 st.rerun()
 
-        st.dataframe(DATA.list_profesores(), use_container_width=True, hide_index=True)
+        st.dataframe(DATA.list_profesionales(), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.markdown("### Carga masiva de profesionales")
@@ -1421,7 +1421,7 @@ def ui_configuracion():
                             zona = None
                         pid = prog_map2.get(p_name) if p_name else None
                         cid = conv_map2.get(c_name) if c_name else None
-                        DATA.upsert_profesor(nom, doc, email, pid, cid, zona)
+                        DATA.upsert_profesional(nom, doc, email, pid, cid, zona)
                         ok += 1
                     success_toast(f"Se procesaron {ok} profesionales.")
                     st.rerun()
@@ -1522,7 +1522,7 @@ def ui_configuracion():
 # ---------------- MAIN ----------------
 def main():
     st.markdown(f"# {APP_ICON} {APP_TITLE}")
-    st.caption("Base SQLite local (`productividad_profesores.db`). Usuarios del mismo enlace comparten la misma información.")
+    st.caption("Base SQLite local (`productividad_profesionales.db`). Usuarios del mismo enlace comparten la misma información.")
     sidebar_filters()
     render_login()
 
@@ -1564,4 +1564,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
