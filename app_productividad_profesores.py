@@ -14,39 +14,6 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-import io
-import pandas as pd
-
-def read_table_upload(uploaded_file) -> pd.DataFrame:
-    """
-    Lee un UploadedFile de Streamlit (CSV/Excel) con tolerancia de codificación.
-    - Excel: usa openpyxl
-    - CSV: intenta utf-8, utf-8-sig, cp1252 y latin1; como último recurso reemplaza caracteres inválidos.
-    """
-    name = uploaded_file.name.lower()
-    raw = uploaded_file.getvalue()  # bytes seguros (no mueve el puntero)
-
-    if name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(io.BytesIO(raw))
-
-    # Default: tratar como CSV con autodetección de separador
-    last_err = None
-    for enc in ("utf-8", "utf-8-sig", "cp1252", "latin1"):
-        try:
-            return pd.read_csv(io.BytesIO(raw), encoding=enc, sep=None, engine="python")
-        except Exception as e:
-            last_err = e
-
-    # Último recurso: decodificar reemplazando caracteres problemáticos
-    try:
-        txt = raw.decode("cp1252", errors="replace")
-        return pd.read_csv(io.StringIO(txt), sep=None, engine="python")
-    except Exception:
-        pass
-
-    # Si nada funcionó, relanza el último error
-    raise last_err
-
 APP_TITLE = "Productividad de Profesionales"
 APP_ICON = "📊"
 DB_SQLITE_PATH = "productividad_profesores.db"
@@ -67,6 +34,35 @@ USERS = {
 }
 
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
+
+
+# === Helper robusto para lectura de archivos (CSV/Excel) con fallback de codificación ===
+def read_table_upload(uploaded_file) -> pd.DataFrame:
+    """
+    Lee un UploadedFile de Streamlit (CSV/Excel) tolerante a codificación.
+    - Excel: usa openpyxl
+    - CSV: intenta utf-8, utf-8-sig, cp1252 y latin1; como último recurso reemplaza caracteres inválidos.
+    """
+    name = uploaded_file.name.lower()
+    raw = uploaded_file.getvalue()  # bytes
+
+    if name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(io.BytesIO(raw))
+
+    last_err = None
+    for enc in ("utf-8", "utf-8-sig", "cp1252", "latin1"):
+        try:
+            return pd.read_csv(io.BytesIO(raw), encoding=enc, sep=None, engine="python")
+        except Exception as e:
+            last_err = e
+
+    try:
+        txt = raw.decode("cp1252", errors="replace")
+        return pd.read_csv(io.StringIO(txt), sep=None, engine="python")
+    except Exception:
+        pass
+
+    raise last_err
 
 
 def _now_tzless() -> str:
@@ -1881,7 +1877,7 @@ def ui_configuracion():
         if file_prof is not None:
             if st.button("Procesar profesionales", key="btn_procesar_profesionales"):
                 try:
-                   df_prof = read_table_upload(file_prof)
+                    df_prof = read_table_upload(file_prof)
 
                     if "nombre" not in df_prof.columns:
                         error_toast("El archivo debe contener al menos la columna 'nombre'.")
@@ -2126,4 +2122,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
