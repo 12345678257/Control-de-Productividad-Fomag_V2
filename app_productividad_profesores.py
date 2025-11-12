@@ -14,6 +14,39 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import io
+import pandas as pd
+
+def read_table_upload(uploaded_file) -> pd.DataFrame:
+    """
+    Lee un UploadedFile de Streamlit (CSV/Excel) con tolerancia de codificación.
+    - Excel: usa openpyxl
+    - CSV: intenta utf-8, utf-8-sig, cp1252 y latin1; como último recurso reemplaza caracteres inválidos.
+    """
+    name = uploaded_file.name.lower()
+    raw = uploaded_file.getvalue()  # bytes seguros (no mueve el puntero)
+
+    if name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(io.BytesIO(raw))
+
+    # Default: tratar como CSV con autodetección de separador
+    last_err = None
+    for enc in ("utf-8", "utf-8-sig", "cp1252", "latin1"):
+        try:
+            return pd.read_csv(io.BytesIO(raw), encoding=enc, sep=None, engine="python")
+        except Exception as e:
+            last_err = e
+
+    # Último recurso: decodificar reemplazando caracteres problemáticos
+    try:
+        txt = raw.decode("cp1252", errors="replace")
+        return pd.read_csv(io.StringIO(txt), sep=None, engine="python")
+    except Exception:
+        pass
+
+    # Si nada funcionó, relanza el último error
+    raise last_err
+
 APP_TITLE = "Productividad de Profesionales"
 APP_ICON = "📊"
 DB_SQLITE_PATH = "productividad_profesores.db"
@@ -1745,10 +1778,7 @@ def ui_configuracion():
         if file_inst is not None:
             if st.button("Procesar instituciones", key="btn_procesar_instituciones"):
                 try:
-                    if file_inst.name.lower().endswith(".csv"):
-                        df_inst = pd.read_csv(file_inst, sep=None, engine="python")
-                    else:
-                        df_inst = pd.read_excel(file_inst)
+                    df_inst = read_table_upload(file_inst)
 
                     if "nombre" not in df_inst.columns:
                         error_toast("El archivo debe contener al menos la columna 'nombre'.")
@@ -1851,10 +1881,8 @@ def ui_configuracion():
         if file_prof is not None:
             if st.button("Procesar profesionales", key="btn_procesar_profesionales"):
                 try:
-                    if file_prof.name.lower().endswith(".csv"):
-                        df_prof = pd.read_csv(file_prof, sep=None, engine="python")
-                    else:
-                        df_prof = pd.read_excel(file_prof)
+                   df_prof = read_table_upload(file_prof)
+
                     if "nombre" not in df_prof.columns:
                         error_toast("El archivo debe contener al menos la columna 'nombre'.")
                     else:
@@ -1989,10 +2017,8 @@ def ui_configuracion():
         if file_pac is not None:
             if st.button("Procesar pacientes", key="btn_procesar_pacientes"):
                 try:
-                    if file_pac.name.lower().endswith(".csv"):
-                        df_pac = pd.read_csv(file_pac, sep=None, engine="python")
-                    else:
-                        df_pac = pd.read_excel(file_pac)
+                    df_pac = read_table_upload(file_pac)
+
                     if "documento" not in df_pac.columns or "nombre" not in df_pac.columns:
                         error_toast("El archivo debe contener al menos las columnas 'documento' y 'nombre'.")
                     else:
@@ -2100,3 +2126,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
