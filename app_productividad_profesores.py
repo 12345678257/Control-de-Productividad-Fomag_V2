@@ -774,6 +774,7 @@ def render_login():
 def ui_cargar_datos(auth_user: Optional[str]):
     st.subheader("Registrar atención / paciente")
 
+    # Selección de programa/convenio/profesional
     c1, c2 = st.columns([1.4, 1.4])
     progs = DATA.list_programas()
     prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
@@ -790,6 +791,7 @@ def ui_cargar_datos(auth_user: Optional[str]):
     fsel = c2.selectbox("Profesional", options=list(prof_map.keys()) if prof_map else [], key="form_profesional")
     fid = prof_map.get(fsel)
 
+    # Ubicación e institución
     instituciones = DATA.list_instituciones()
     institucion_id = None
     localidad_val = municipio_val = departamento_val = None
@@ -821,38 +823,157 @@ def ui_cargar_datos(auth_user: Optional[str]):
             municipio_val = row.get("municipio")
             departamento_val = row.get("departamento")
 
+    # Fecha y actividad
     c3, c4 = st.columns([1, 1])
     fecha = c3.date_input("Fecha de la atención", value=date.today(), key="form_fecha")
     actividad = c4.selectbox("Actividad / plantilla", ACTIVIDADES_PLANTILLAS, key="form_actividad")
 
+    # ---------------- AUTORELLENO PACIENTE ----------------
     st.markdown("#### Datos del paciente")
+
+    # Inicializa claves de estado para widgets (para que asignarles valor funcione)
+    for k, default in [
+        ("pac_nombre_input", ""),
+        ("pac_fecha_nac_input", ""),
+        ("pac_telefono_input", ""),
+        ("pac_email_input", ""),
+        ("pac_direccion_input", ""),
+        ("pac_localidad_input", ""),
+        ("pac_municipio_input", ""),
+        ("pac_departamento_input", ""),
+    ]:
+        if k not in st.session_state:
+            st.session_state[k] = default
+    if "pac_sexo_sel" not in st.session_state:
+        st.session_state["pac_sexo_sel"] = "(No especifica)"
+    if "pac_zona_sel" not in st.session_state:
+        st.session_state["pac_zona_sel"] = "(No especifica)"
+    if "pac_id_actual" not in st.session_state:
+        st.session_state["pac_id_actual"] = None
+
+    # Documento + buscar
     p1, p2 = st.columns([1, 1])
     pac_doc = p1.text_input("Documento del paciente (cédula)", key="pac_doc")
     if p2.button("Buscar paciente por documento", key="btn_buscar_paciente"):
         try:
-            pac = DATA.get_paciente_por_documento(pac_doc)
+            doc_trim = (pac_doc or "").strip()
+            pac = DATA.get_paciente_por_documento(doc_trim)
             if pac:
-                st.session_state.update(
-                    {
-                        "pac_id_actual": pac.get("id"),
-                        "pac_nombre": pac.get("nombre"),
-                        "pac_fecha_nac": pac.get("fecha_nacimiento"),
-                        "pac_sexo": pac.get("sexo"),
-                        "pac_telefono": pac.get("telefono"),
-                        "pac_email": pac.get("email"),
-                        "pac_direccion": pac.get("direccion"),
-                        "pac_localidad": pac.get("localidad"),
-                        "pac_municipio": pac.get("municipio"),
-                        "pac_departamento": pac.get("departamento"),
-                        "pac_zona": pac.get("zona"),
-                    }
-                )
-                success_toast("Paciente encontrado.")
+                st.session_state["pac_id_actual"] = pac.get("id")
+                st.session_state["pac_nombre_input"] = pac.get("nombre", "") or ""
+                # Sexo
+                sexo = pac.get("sexo")
+                st.session_state["pac_sexo_sel"] = sexo if sexo in ["F", "M", "Otro"] else "(No especifica)"
+                # Fecha nacimiento (cadena)
+                st.session_state["pac_fecha_nac_input"] = pac.get("fecha_nacimiento", "") or ""
+                # Contacto / dirección
+                st.session_state["pac_telefono_input"] = pac.get("telefono", "") or ""
+                st.session_state["pac_email_input"] = pac.get("email", "") or ""
+                st.session_state["pac_direccion_input"] = pac.get("direccion", "") or ""
+                # Geo
+                st.session_state["pac_localidad_input"] = pac.get("localidad", "") or ""
+                st.session_state["pac_municipio_input"] = pac.get("municipio", "") or ""
+                st.session_state["pac_departamento_input"] = pac.get("departamento", "") or ""
+                # Zona
+                zona = pac.get("zona")
+                st.session_state["pac_zona_sel"] = zona if zona in ["Urbana", "Rural"] else "(No especifica)"
+
+                success_toast("Paciente encontrado. Campos autocompletados.")
+                st.rerun()  # <- necesario para que los widgets tomen los nuevos valores
             else:
                 st.session_state["pac_id_actual"] = None
                 warn_toast("No se encontró paciente. Diligencia y se creará.")
         except Exception as e:
             error_toast(f"Error buscando paciente: {e}")
+
+    # Widgets con claves que acabamos de llenar
+    p3, p4 = st.columns([1.5, 1])
+    pac_nombre = p3.text_input("Nombre completo del paciente", key="pac_nombre_input")
+    sexo_opts = ["(No especifica)", "F", "M", "Otro"]
+    pac_sexo = p4.selectbox("Sexo (opcional)", options=sexo_opts, key="pac_sexo_sel")
+
+    p5, p6 = st.columns([1, 1])
+    pac_fecha_nac = p5.text_input("Fecha de nacimiento (AAAA-MM-DD, opcional)", key="pac_fecha_nac_input")
+    pac_telefono = p6.text_input("Teléfono (opcional)", key="pac_telefono_input")
+
+    p7, p8 = st.columns([1, 1])
+    pac_email = p7.text_input("Email (opcional)", key="pac_email_input")
+    pac_direccion = p8.text_input("Dirección (opcional)", key="pac_direccion_input")
+
+    p9, p10, p11 = st.columns([1, 1, 1])
+    pac_loc = p9.text_input("Localidad paciente (opcional)", key="pac_localidad_input")
+    pac_mun = p10.text_input("Municipio paciente (opcional)", key="pac_municipio_input")
+    pac_dep = p11.text_input("Departamento paciente (opcional)", key="pac_departamento_input")
+
+    zcol, _ = st.columns([1, 3])
+    zona_opts = ["(No especifica)", "Urbana", "Rural"]
+    pac_zona = zcol.selectbox("Zona (Rural/Urbana)", options=zona_opts, key="pac_zona_sel")
+
+    # Estado de atención
+    c9, c10 = st.columns([1, 1])
+    atendido_flag = c9.radio("¿Atendido?", ["No", "Sí"], index=1, horizontal=True, key="form_atendido")
+    registrado_panacea = c10.checkbox("Ya registrado en Panacea", key="form_reg_panacea")
+
+    c11, c12 = st.columns([1, 1])
+    tipo_contacto = c11.selectbox("Tipo de contacto", options=["(No especifica)"] + TIPOS_CONTACTO, key="form_tipo_contacto")
+    duracion_minutos = c12.number_input("Duración de la atención (minutos, opcional)", min_value=0, max_value=480, step=5, key="form_duracion_minutos")
+    dur_val = int(duracion_minutos) if duracion_minutos > 0 else None
+    tipo_contacto_val = None if tipo_contacto == "(No especifica)" else tipo_contacto
+
+    observaciones = st.text_area("Observaciones", key="form_observaciones")
+
+    # Guardar
+    btn_guardar = st.button(
+        "Guardar atención",
+        type="primary",
+        use_container_width=True,
+        key="btn_guardar_atencion",
+        disabled=not all([pid, cid, fid, institucion_id]),
+    )
+    if btn_guardar:
+        if not pac_doc or not pac_nombre:
+            warn_toast("Documento y nombre del paciente son obligatorios.")
+        else:
+            try:
+                sexo_val = None if pac_sexo == "(No especifica)" else pac_sexo
+                zona_val = None if pac_zona == "(No especifica)" else pac_zona
+                pac_id = DATA.upsert_paciente(
+                    numero_documento=(pac_doc or "").strip(),
+                    nombre=(pac_nombre or "").strip(),
+                    fecha_nacimiento=pac_fecha_nac or None,
+                    sexo=sexo_val,
+                    telefono=pac_telefono or None,
+                    email=pac_email or None,
+                    direccion=pac_direccion or None,
+                    localidad=pac_loc or None,
+                    municipio=pac_mun or None,
+                    departamento=pac_dep or None,
+                    zona=zona_val,
+                )
+                DATA.insert_registro(
+                    fecha=fecha,
+                    programa_id=int(pid),
+                    convenio_id=int(cid),
+                    institucion_id=int(institucion_id),
+                    profesor_id=int(fid),
+                    paciente_id=pac_id,
+                    localidad=localidad_val,
+                    municipio=municipio_val,
+                    departamento=departamento_val,
+                    numero_paciente=(pac_doc or "").strip(),
+                    nombre_paciente=(pac_nombre or "").strip(),
+                    actividad=actividad,
+                    atendido=True if atendido_flag == "Sí" else False,
+                    registrado_panacea=bool(registrado_panacea),
+                    duracion_minutos=dur_val,
+                    tipo_contacto=tipo_contacto_val,
+                    observaciones=observaciones,
+                    creado_por=auth_user,
+                )
+                success_toast("Atención registrada.")
+                st.rerun()
+            except Exception as e:
+                error_toast(f"Error al guardar: {e}")
 
     p3, p4 = st.columns([1.5, 1])
     pac_nombre = p3.text_input(
@@ -1567,3 +1688,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
