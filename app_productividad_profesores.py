@@ -912,58 +912,79 @@ def ui_cargar_datos(auth_user: Optional[str]):
 
     observaciones = st.text_area("Observaciones", key=K("observaciones"))
 
-    # Guardar
-    if st.button("Guardar atención", type="primary", use_container_width=True, key=K("btn_guardar_atencion"),
-                 disabled=not all([pid, cid, fid, institucion_id])):
-        if not st.session_state[K("pac_doc")] or not st.session_state[K("pac_nombre")]:
-            warn_toast("Documento y nombre del paciente son obligatorios.")
-        else:
-            try:
-                dur = st.session_state.get(K("duracion_minutos")) or 0
-                dur_val = int(dur) if dur and dur > 0 else None
-                tc = st.session_state.get(K("tipo_contacto"))
-                tipo_contacto_val = None if tc == "(No especifica)" else tc
-                sexo_val = None if st.session_state[K("pac_sexo")] == "(No especifica)" else st.session_state[K("pac_sexo")]
-                zona_val = None if st.session_state[K("pac_zona")] == "(No especifica)" else st.session_state[K("pac_zona")]
+   # Guardar (siempre habilitado; validación explícita)
+clicked = st.button(
+    "Guardar atención",
+    type="primary",
+    use_container_width=True,
+    key=K("btn_guardar_atencion"),
+)
 
-                pac_id = DATA.upsert_paciente(
-                    numero_documento=(st.session_state[K("pac_doc")] or "").strip(),
-                    nombre=(st.session_state[K("pac_nombre")] or "").strip(),
-                    fecha_nacimiento=(st.session_state[K("pac_fecha_nac")] or None),
-                    sexo=sexo_val,
-                    telefono=(st.session_state[K("pac_telefono")] or None),
-                    email=(st.session_state[K("pac_email")] or None),
-                    direccion=(st.session_state[K("pac_direccion")] or None),
-                    localidad=(st.session_state[K("pac_localidad")] or None),
-                    municipio=(st.session_state[K("pac_municipio")] or None),
-                    departamento=(st.session_state[K("pac_departamento")] or None),
-                    zona=zona_val,
-                )
+if clicked:
+    # Validaciones claras
+    faltantes = []
+    if not pid: faltantes.append("Programa")
+    if not cid: faltantes.append("Convenio")
+    if not fid: faltantes.append("Profesional")
+    if not institucion_id: faltantes.append("Institución")
+    if not (st.session_state.get(K("pac_doc")) or "").strip():
+        faltantes.append("Documento del paciente")
+    if not (st.session_state.get(K("pac_nombre")) or "").strip():
+        faltantes.append("Nombre del paciente")
 
-                DATA.insert_registro(
-                    fecha=st.session_state[K("fecha")],
-                    programa_id=int(pid),
-                    convenio_id=int(cid),
-                    institucion_id=int(institucion_id),
-                    profesor_id=int(fid),
-                    paciente_id=pac_id,
-                    localidad=localidad_val,
-                    municipio=municipio_val,
-                    departamento=departamento_val,
-                    numero_paciente=(st.session_state[K("pac_doc")] or "").strip(),
-                    nombre_paciente=(st.session_state[K("pac_nombre")] or "").strip(),
-                    actividad=st.session_state[K("actividad")],
-                    atendido=True if st.session_state[K("atendido")] == "Sí" else False,
-                    registrado_panacea=bool(st.session_state[K("reg_panacea")]),
-                    duracion_minutos=dur_val,
-                    tipo_contacto=tipo_contacto_val,
-                    observaciones=observaciones,
-                    creado_por=auth_user,
-                )
-                success_toast("Atención registrada.")
-                st.rerun()
-            except Exception as e:
-                error_toast(f"Error al guardar: {e}")
+    if faltantes:
+        error_toast("Faltan datos obligatorios: " + ", ".join(faltantes))
+    else:
+        try:
+            # Normaliza opcionales
+            dur = st.session_state.get(K("duracion_minutos")) or 0
+            dur_val = int(dur) if dur and dur > 0 else None
+            tc = st.session_state.get(K("tipo_contacto"))
+            tipo_contacto_val = None if tc == "(No especifica)" else tc
+            sexo_val = None if st.session_state[K("pac_sexo")] == "(No especifica)" else st.session_state[K("pac_sexo")]
+            zona_val = None if st.session_state[K("pac_zona")] == "(No especifica)" else st.session_state[K("pac_zona")]
+
+            # Upsert paciente (crea/actualiza)
+            pac_id = DATA.upsert_paciente(
+                numero_documento=(st.session_state[K("pac_doc")] or "").strip(),
+                nombre=(st.session_state[K("pac_nombre")] or "").strip(),
+                fecha_nacimiento=(st.session_state[K("pac_fecha_nac")] or None),
+                sexo=sexo_val,
+                telefono=(st.session_state[K("pac_telefono")] or None),
+                email=(st.session_state[K("pac_email")] or None),
+                direccion=(st.session_state[K("pac_direccion")] or None),
+                localidad=(st.session_state[K("pac_localidad")] or None),
+                municipio=(st.session_state[K("pac_municipio")] or None),
+                departamento=(st.session_state[K("pac_departamento")] or None),
+                zona=zona_val,
+            )
+
+            # Inserta el registro de atención
+            DATA.insert_registro(
+                fecha=st.session_state[K("fecha")],
+                programa_id=int(pid),
+                convenio_id=int(cid),
+                institucion_id=int(institucion_id),
+                profesor_id=int(fid),
+                paciente_id=pac_id,
+                localidad=localidad_val,
+                municipio=municipio_val,
+                departamento=departamento_val,
+                numero_paciente=(st.session_state[K("pac_doc")] or "").strip(),
+                nombre_paciente=(st.session_state[K("pac_nombre")] or "").strip(),
+                actividad=st.session_state[K("actividad")],
+                atendido=True if st.session_state[K("atendido")] == "Sí" else False,
+                registrado_panacea=bool(st.session_state[K("reg_panacea")]),
+                duracion_minutos=dur_val,
+                tipo_contacto=tipo_contacto_val,
+                observaciones=st.session_state.get(K("observaciones")),
+                creado_por=auth_user,
+            )
+
+            success_toast("Atención registrada.")
+            st.rerun()
+        except Exception as e:
+            error_toast(f"Error al guardar: {e}")
 
 # ---------------- UI: LISTADO ----------------
 def ui_registros():
@@ -1544,3 +1565,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
