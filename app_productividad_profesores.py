@@ -13,6 +13,107 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import io, re, unicodedata
+
+def _slug_col(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s).replace("\ufeff", "")  # BOM
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    return s.strip("_")
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # 1) normalizar
+    df.columns = [_slug_col(c) for c in df.columns]
+
+    # 2) mapear sinónimos
+    synonyms = {
+        "num_documento": "documento",
+        "numero_documento": "documento",
+        "nro_documento": "documento",
+        "identificacion": "documento",
+        "identificación": "documento",
+        "cedula": "documento",
+        "cedula_de_ciudadania": "documento",
+        "c_c": "documento",
+
+        "nombre_completo": "nombre",
+        "nombres": "nombres",
+        "apellidos": "apellidos",
+
+        "correo": "email",
+        "correo_electronico": "email",
+
+        "telefono_contacto": "telefono",
+        "teléfono": "telefono",
+
+        "dirección": "direccion",
+        "fecha_de_nacimiento": "fecha_nacimiento",
+        "zona_geografica": "zona",
+    }
+    df = df.rename(columns={c: synonyms.get(c, c) for c in df.columns})
+
+    # 3) construir 'nombre' si vienen 'nombres' y/o 'apellidos'
+    cols = set(df.columns)
+    if "nombre" not in cols and ("nombres" in cols or "apellidos" in cols):
+        n = df["nombres"].astype(str) if "nombres" in cols else ""
+        a = df["apellidos"].astype(str) if "apellidos" in cols else ""
+        df["nombre"] = (n.fillna("") + " " + a.fillna("")).str.strip().replace("", pd.NA)
+
+    # 4) limpiar espacios invisibles
+    for key_col in ("documento", "nombre"):
+        if key_col in df.columns:
+            df[key_col] = df[key_col].astype(str).str.replace("\u200b", "", regex=False).str.strip()
+
+    return df
+
+def read_table_upload(uploaded_file) -> pd.DataFrame:
+    """
+    Lee CSV/Excel con tolerancia de codificación y separador.
+    - Excel: .xlsx/.xls
+    - CSV: intenta utf-8, utf-8-sig, cp1252, latin1 y separadores auto, ',', ';'
+    """
+    name = uploaded_file.name.lower()
+    raw = uploaded_file.getvalue()
+
+    if name.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(io.BytesIO(raw))
+        return normalize_columns(df)
+
+    last_err = None
+    encodings = ("utf-8", "utf-8-sig", "cp1252", "latin1")
+    seps = (None, ",", ";")
+    for enc in encodings:
+        for sep in seps:
+            try:
+                df = pd.read_csv(io.BytesIO(raw), encoding=enc, sep=sep, engine="python")
+                # Si solo trajo 1 columna, probar ';' explícito
+                if df.shape[1] == 1 and sep is None:
+                    try:
+                        df2 = pd.read_csv(io.BytesIO(raw), encoding=enc, sep=";", engine="python")
+                        if df2.shape[1] > 1:
+                            df = df2
+                    except Exception:
+                        pass
+                return normalize_columns(df)
+            except Exception as e:
+                last_err = e
+
+    # último recurso
+    try:
+        txt = raw.decode("cp1252", errors="replace")
+        df = pd.read_csv(io.StringIO(txt), sep=None, engine="python")
+        return normalize_columns(df)
+    except Exception:
+        pass
+
+    raise last_err
+
+
 
 APP_TITLE = "Productividad de Profesionales"
 APP_ICON = "📊"
@@ -1774,10 +1875,10 @@ def ui_configuracion():
         if file_inst is not None:
             if st.button("Procesar instituciones", key="btn_procesar_instituciones"):
                 try:
-                    df_inst = read_table_upload(file_inst)
+                  df_inst = read_table_upload(file_inst)   # ← ya normaliza columnas
+if "nombre" not in df_inst.columns:
+    st.error(f"El archivo debe contener 'nombre'. Columnas: {list(df_inst.columns)}")
 
-                    if "nombre" not in df_inst.columns:
-                        error_toast("El archivo debe contener al menos la columna 'nombre'.")
                     else:
                         ok = 0
                         for _, row in df_inst.iterrows():
@@ -1877,10 +1978,11 @@ def ui_configuracion():
         if file_prof is not None:
             if st.button("Procesar profesionales", key="btn_procesar_profesionales"):
                 try:
-                    df_prof = read_table_upload(file_prof)
+                  df_prof = read_table_upload(file_prof)   # ← ya normaliza columnas
+# if "nombre" not in df_prof.columns:  # reemplaza por
+if "nombre" not in df_prof.columns:
+    st.error(f"El archivo debe contener 'nombre'. Columnas: {list(df_prof.columns)}")
 
-                    if "nombre" not in df_prof.columns:
-                        error_toast("El archivo debe contener al menos la columna 'nombre'.")
                     else:
                         progs2 = DATA.list_programas()
                         prog_map2 = {r["nombre"]: int(r["id"]) for _, r in progs2.iterrows()} if not progs2.empty else {}
@@ -2005,51 +2107,60 @@ def ui_configuracion():
             - `zona` (Rural / Urbana)
             """
         )
-        file_pac = st.file_uploader(
-            "Archivo de pacientes (Excel o CSV)",
-            type=["xlsx", "xls", "csv"],
-            key="up_pacientes",
-        )
-        if file_pac is not None:
-            if st.button("Procesar pacientes", key="btn_procesar_pacientes"):
-                try:
-                    df_pac = read_table_upload(file_pac)
+       # ...
+file_pac = st.file_uploader(
+    "Archivo de pacientes (Excel o CSV)",
+    type=["xlsx", "xls", "csv"],
+    key="up_pacientes",
+)
+if file_pac is not None:
+    if st.checkbox("Ver columnas detectadas (debug)", key="dbg_cols_pac"):
+        try:
+            _tmp = read_table_upload(file_pac)
+            st.write(list(_tmp.columns))
+        except Exception as e:
+            st.error(f"Error leyendo archivo: {e}")
 
-                    if "documento" not in df_pac.columns or "nombre" not in df_pac.columns:
-                        error_toast("El archivo debe contener al menos las columnas 'documento' y 'nombre'.")
-                    else:
-                        ok = 0
-                        for _, row in df_pac.iterrows():
-                            doc = str(row["documento"]).strip()
-                            nom = str(row["nombre"]).strip()
-                            if not doc or not nom:
-                                continue
-                            zona_val = (
-                                str(row["zona"]).strip()
-                                if "zona" in df_pac.columns and pd.notna(row["zona"])
-                                else None
-                            )
-                            if zona_val not in ["Rural", "Urbana"]:
-                                zona_val = None
+    if st.button("Procesar pacientes", key="btn_procesar_pacientes"):
+        try:
+            df_pac = read_table_upload(file_pac)
 
-                            DATA.upsert_paciente(
-                                numero_documento=doc,
-                                nombre=nom,
-                                fecha_nacimiento=str(row["fecha_nacimiento"]) if "fecha_nacimiento" in df_pac.columns and pd.notna(row["fecha_nacimiento"]) else None,
-                                sexo=str(row["sexo"]).strip() if "sexo" in df_pac.columns and pd.notna(row["sexo"]) else None,
-                                telefono=str(row["telefono"]).strip() if "telefono" in df_pac.columns and pd.notna(row["telefono"]) else None,
-                                email=str(row["email"]).strip() if "email" in df_pac.columns and pd.notna(row["email"]) else None,
-                                direccion=str(row["direccion"]).strip() if "direccion" in df_pac.columns and pd.notna(row["direccion"]) else None,
-                                localidad=str(row["localidad"]).strip() if "localidad" in df_pac.columns and pd.notna(row["localidad"]) else None,
-                                municipio=str(row["municipio"]).strip() if "municipio" in df_pac.columns and pd.notna(row["municipio"]) else None,
-                                departamento=str(row["departamento"]).strip() if "departamento" in df_pac.columns and pd.notna(row["departamento"]) else None,
-                                zona=zona_val,
-                            )
-                            ok += 1
-                        success_toast(f"Se procesaron {ok} pacientes.")
-                        st.rerun()
-                except Exception as e:
-                    error_toast(f"Error procesando pacientes: {e}")
+            if not {"documento", "nombre"}.issubset(df_pac.columns):
+                st.error(
+                    f"El archivo debe contener 'documento' y 'nombre'. "
+                    f"Columnas detectadas: {list(df_pac.columns)}"
+                )
+            else:
+                ok = 0
+                for _, row in df_pac.iterrows():
+                    doc = str(row.get("documento", "")).strip()
+                    nom = str(row.get("nombre", "")).strip()
+                    if not doc or not nom:
+                        continue
+
+                    zona_val = str(row["zona"]).strip() if "zona" in df_pac.columns and pd.notna(row["zona"]) else None
+                    if zona_val not in ("Rural", "Urbana"):
+                        zona_val = None
+
+                    DATA.upsert_paciente(
+                        numero_documento=doc,
+                        nombre=nom,
+                        fecha_nacimiento=str(row["fecha_nacimiento"]) if "fecha_nacimiento" in df_pac.columns and pd.notna(row["fecha_nacimiento"]) else None,
+                        sexo=str(row["sexo"]).strip() if "sexo" in df_pac.columns and pd.notna(row["sexo"]) else None,
+                        telefono=str(row["telefono"]).strip() if "telefono" in df_pac.columns and pd.notna(row["telefono"]) else None,
+                        email=str(row["email"]).strip() if "email" in df_pac.columns and pd.notna(row["email"]) else None,
+                        direccion=str(row["direccion"]).strip() if "direccion" in df_pac.columns and pd.notna(row["direccion"]) else None,
+                        localidad=str(row["localidad"]).strip() if "localidad" in df_pac.columns and pd.notna(row["localidad"]) else None,
+                        municipio=str(row["municipio"]).strip() if "municipio" in df_pac.columns and pd.notna(row["municipio"]) else None,
+                        departamento=str(row["departamento"]).strip() if "departamento" in df_pac.columns and pd.notna(row["departamento"]) else None,
+                        zona=zona_val,
+                    )
+                    ok += 1
+                st.success(f"Se procesaron {ok} pacientes.")
+                st.rerun()
+        except Exception as e:
+            st.error(f"Error procesando pacientes: {e}")
+
 
 
 # -------------------------------------------------------------
@@ -2122,3 +2233,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
