@@ -2320,7 +2320,7 @@ def _reset_database(method: str):
             with SQLITE_CONN:
                 SQLITE_CONN.execute("PRAGMA foreign_keys=OFF;")
                 for t in ["registros","viaticos","agenda","papeleria",
-                          "profesores","pacientes","instituciones","convenios","programas"]:
+                          "Profesional","pacientes","instituciones","convenios","programas"]:
                     try:
                         SQLITE_CONN.execute(f"DELETE FROM {t};")
                     except Exception:
@@ -2459,5 +2459,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
