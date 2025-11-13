@@ -1,4 +1,4 @@
-# app_productividad_profesores.py
+# app_productividad_profesores.py (con campo "paciente_priorizado")
 from datetime import datetime, date, time as dtime
 from typing import Optional, Dict, Any, List, Tuple
 import io
@@ -78,6 +78,10 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "paciente_creado_panacea": "paciente_creado_panacea",
         "creado_panacea": "paciente_creado_panacea",
         "paciente_creado": "paciente_creado_panacea",
+
+        # paciente priorizado (nuevo)
+        "priorizado": "paciente_priorizado",
+        "es_priorizado": "paciente_priorizado",
     }
     df = df.rename(columns={c: synonyms.get(c, c) for c in df.columns})
 
@@ -245,7 +249,8 @@ SQLITE_DDL = {
         actividad TEXT,
         atendido INTEGER,
         registrado_panacea INTEGER,           -- atención registrada (NO el paciente)
-        paciente_creado_panacea INTEGER,      -- ⬅️ NUEVO: paciente creado en Panacea
+        paciente_creado_panacea INTEGER,      -- paciente creado en Panacea
+        paciente_priorizado INTEGER,          -- ⬅️ NUEVO campo
         duracion_minutos INTEGER,
         tipo_contacto TEXT,
         pacientes_programados INTEGER NOT NULL,
@@ -333,14 +338,15 @@ def ensure_sqlite_schema():
             SQLITE_CONN.execute(ddl)
         # Migraciones suaves
         cur = SQLITE_CONN.execute("PRAGMA table_info(registros);")
-        have = {r["name"] for r in cur.fetchall()}
+        have = {r[1] for r in cur.fetchall()}  # r[1] = name
         add_cols = {
             "numero_paciente": "ALTER TABLE registros ADD COLUMN numero_paciente TEXT;",
             "nombre_paciente": "ALTER TABLE registros ADD COLUMN nombre_paciente TEXT;",
             "actividad": "ALTER TABLE registros ADD COLUMN actividad TEXT;",
             "atendido": "ALTER TABLE registros ADD COLUMN atendido INTEGER;",
             "registrado_panacea": "ALTER TABLE registros ADD COLUMN registrado_panacea INTEGER;",
-            "paciente_creado_panacea": "ALTER TABLE registros ADD COLUMN paciente_creado_panacea INTEGER;",  # NUEVO
+            "paciente_creado_panacea": "ALTER TABLE registros ADD COLUMN paciente_creado_panacea INTEGER;",
+            "paciente_priorizado": "ALTER TABLE registros ADD COLUMN paciente_priorizado INTEGER;",
             "duracion_minutos": "ALTER TABLE registros ADD COLUMN duracion_minutos INTEGER;",
             "tipo_contacto": "ALTER TABLE registros ADD COLUMN tipo_contacto TEXT;",
             "paciente_id": "ALTER TABLE registros ADD COLUMN paciente_id INTEGER;",
@@ -360,7 +366,7 @@ class DataAccess:
     def programa_id_by_name(self, nombre: str) -> Optional[int]:
         if not nombre: return None
         r = self.db.execute("SELECT id FROM programas WHERE nombre=? AND activo=1", (nombre,)).fetchone()
-        return int(r["id"]) if r else None
+        return int(r[0]) if r else None
 
     def convenio_id_by_name(self, nombre: str, programa_id: Optional[int]) -> Optional[int]:
         if not nombre or not programa_id: return None
@@ -368,7 +374,7 @@ class DataAccess:
             "SELECT id FROM convenios WHERE nombre=? AND programa_id=? AND activo=1",
             (nombre, programa_id),
         ).fetchone()
-        return int(r["id"]) if r else None
+        return int(r[0]) if r else None
 
     def institucion_id_by_name_geo(
         self, nombre: str, municipio: Optional[str], departamento: Optional[str]
@@ -379,12 +385,12 @@ class DataAccess:
                 "SELECT id FROM instituciones WHERE nombre=? AND municipio=? AND departamento=? AND activo=1",
                 (nombre, municipio, departamento),
             ).fetchone()
-            if r: return int(r["id"])
+            if r: return int(r[0])
         r = self.db.execute(
             "SELECT id FROM instituciones WHERE nombre=? AND activo=1 ORDER BY id ASC",
             (nombre,),
         ).fetchone()
-        return int(r["id"]) if r else None
+        return int(r[0]) if r else None
 
     def profesor_id_by_name(self, nombre: str, programa_id: Optional[int], convenio_id: Optional[int]) -> Optional[int]:
         if not nombre: return None
@@ -392,7 +398,7 @@ class DataAccess:
             "SELECT id FROM profesores WHERE nombre=? AND activo=1 ORDER BY id ASC",
             (nombre,),
         ).fetchone()
-        return int(r["id"]) if r else None
+        return int(r[0]) if r else None
 
     # CRUD básicos
     def list_programas(self) -> pd.DataFrame:
@@ -403,7 +409,7 @@ class DataAccess:
         with self.db:
             self.db.execute("INSERT OR IGNORE INTO programas(nombre,activo) VALUES(?,1)", (nombre.strip(),))
         r = self.db.execute("SELECT id FROM programas WHERE nombre=?", (nombre.strip(),)).fetchone()
-        return int(r["id"])
+        return int(r[0])
 
     def list_convenios(self, programa_id: Optional[int] = None) -> pd.DataFrame:
         q = "SELECT * FROM convenios WHERE activo=1"
@@ -424,7 +430,7 @@ class DataAccess:
         r = self.db.execute(
             "SELECT id FROM convenios WHERE nombre=? AND programa_id=?", (nombre.strip(), programa_id)
         ).fetchone()
-        return int(r["id"])
+        return int(r[0])
 
     def list_instituciones(self) -> pd.DataFrame:
         return pd.read_sql_query(
@@ -441,7 +447,7 @@ class DataAccess:
         r = self.db.execute(
             "SELECT id FROM instituciones WHERE nombre=? ORDER BY id ASC", (nombre.strip(),)
         ).fetchone()
-        return int(r["id"])
+        return int(r[0])
 
     def list_profesores(self, programa_id: Optional[int] = None, convenio_id: Optional[int] = None) -> pd.DataFrame:
         q = "SELECT * FROM profesores WHERE activo=1"
@@ -464,7 +470,7 @@ class DataAccess:
                 (nombre.strip(), (documento or None), (email or None), programa_id, convenio_id, zona),
             )
         r = self.db.execute("SELECT id FROM profesores WHERE nombre=? ORDER BY id DESC", (nombre.strip(),)).fetchone()
-        return int(r["id"])
+        return int(r[0])
 
     def list_pacientes(self) -> pd.DataFrame:
         return pd.read_sql_query("SELECT * FROM pacientes WHERE activo=1 ORDER BY nombre", self.db)
@@ -484,12 +490,9 @@ class DataAccess:
         nombre = (nombre or "").strip()
         if not numero_documento or not nombre:
             raise ValueError("Documento y nombre del paciente son obligatorios")
-        row = self.db.execute("SELECT id FROM pacientes WHERE numero_documento=?", (numero_documento)).fetchone()
-        # Fix param tuple for sqlite
-        if row is None:
-            row = self.db.execute("SELECT id FROM pacientes WHERE numero_documento=?", (numero_documento,)).fetchone()
+        row = self.db.execute("SELECT id FROM pacientes WHERE numero_documento=?", (numero_documento,)).fetchone()
         if row:
-            pid = int(row["id"])
+            pid = int(row[0])
             with self.db:
                 self.db.execute(
                     """UPDATE pacientes
@@ -512,7 +515,8 @@ class DataAccess:
     def insert_registro(
         self, fecha: date, programa_id: int, convenio_id: int, institucion_id: int, profesor_id: int,
         paciente_id: Optional[int], localidad, municipio, departamento, numero_paciente, nombre_paciente,
-        actividad, atendido, registrado_panacea, paciente_creado_panacea, duracion_minutos, tipo_contacto, observaciones, creado_por
+        actividad, atendido, registrado_panacea, paciente_creado_panacea, paciente_priorizado,
+        duracion_minutos, tipo_contacto, observaciones, creado_por
     ) -> None:
         row = {
             "fecha": fecha.strftime("%Y-%m-%d") if isinstance(fecha, date) else str(fecha),
@@ -530,6 +534,7 @@ class DataAccess:
             "atendido": 1 if atendido else 0,
             "registrado_panacea": 1 if registrado_panacea else 0,          # atención
             "paciente_creado_panacea": 1 if paciente_creado_panacea else 0, # paciente
+            "paciente_priorizado": 1 if paciente_priorizado else 0,         # NUEVO
             "duracion_minutos": int(duracion_minutos) if duracion_minutos is not None else None,
             "tipo_contacto": tipo_contacto,
             "pacientes_programados": 1,
@@ -821,7 +826,8 @@ def plantilla_atenciones_df() -> pd.DataFrame:
         "profesional", "documento", "nombre", "actividad",
         "atendido",
         "registrado_panacea",        # atención registrada
-        "paciente_creado_panacea",   # ⬅️ nuevo campo
+        "paciente_creado_panacea",   # nuevo campo
+        "paciente_priorizado",       # NUEVO campo en plantilla
         "tipo_contacto", "duracion_minutos", "observaciones",
         "sexo", "fecha_nacimiento", "telefono", "email", "direccion", "zona"
     ]
@@ -839,7 +845,7 @@ def parse_fecha(value) -> str:
 def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, List[str]]:
     """
     Columnas mínimas: fecha, programa, convenio, institucion, profesional, documento, nombre, actividad
-    Opcionales: departamento, municipio, localidad, atendido, registrado_panacea, paciente_creado_panacea,
+    Opcionales: departamento, municipio, localidad, atendido, registrado_panacea, paciente_creado_panacea, paciente_priorizado,
                 tipo_contacto, duracion_minutos, observaciones, sexo, fecha_nacimiento, telefono, email,
                 direccion, zona
     """
@@ -901,9 +907,13 @@ def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, L
             reg_field_att = next((c for c in ["registrado_panacea","atencion_en_panacea","atencion_registrada_panacea","en_panacea"] if c in df.columns), None)
             registrado_panacea = bool(str2bool(r.get(reg_field_att))) if reg_field_att else False
 
-            # paciente creado en Panacea (NUEVO)
+            # paciente creado en Panacea
             reg_field_pac = next((c for c in ["paciente_creado_panacea","paciente_en_panacea","creado_panacea","paciente_creado"] if c in df.columns), None)
             paciente_creado_panacea = bool(str2bool(r.get(reg_field_pac))) if reg_field_pac else False
+
+            # paciente priorizado (nuevo)
+            reg_field_pri = next((c for c in ["paciente_priorizado","priorizado","es_priorizado"] if c in df.columns), None)
+            paciente_priorizado = bool(str2bool(r.get(reg_field_pri))) if reg_field_pri else False
 
             tipo_contacto = str(r.get("tipo_contacto")).strip() if pd.notna(r.get("tipo_contacto")) else None
             if tipo_contacto in ("", "(no especifica)", "no especifica"): tipo_contacto = None
@@ -918,7 +928,8 @@ def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, L
                 numero_paciente=doc, nombre_paciente=nom,
                 actividad=actividad, atendido=atendido,
                 registrado_panacea=registrado_panacea,
-                paciente_creado_panacea=paciente_creado_panacea,  # ⬅️ nuevo
+                paciente_creado_panacea=paciente_creado_panacea,
+                paciente_priorizado=paciente_priorizado,  # ⬅️ nuevo
                 duracion_minutos=duracion, tipo_contacto=tipo_contacto,
                 observaciones=(str(r.get("observaciones")).strip() if pd.notna(r.get("observaciones")) else None),
                 creado_por=auth_user,
@@ -941,7 +952,8 @@ def ui_cargar_datos(auth_user: Optional[str]):
         K("pac_nombre"): "", K("pac_fecha_nac"): "", K("pac_telefono"): "", K("pac_email"): "",
         K("pac_direccion"): "", K("pac_localidad"): "", K("pac_municipio"): "", K("pac_departamento"): "",
         K("pac_sexo"): "(No especifica)", K("pac_zona"): "(No especifica)", K("pac_id_actual"): None, K("pac_doc"): "",
-        K("pac_creado_panacea"): False,   # ⬅️ nuevo default
+        K("pac_creado_panacea"): False,   # paciente creado
+        K("pac_priorizado"): False,       # ⬅️ NUEVO default
     }
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
@@ -1049,14 +1061,17 @@ def ui_cargar_datos(auth_user: Optional[str]):
     zcol.selectbox("Zona (Rural/Urbana)", options=zona_opts, key=K("pac_zona"))
 
     # ----- NUEVOS CHECKS -----
-    zcol2.checkbox("Paciente creado en Panacea", key=K("pac_creado_panacea"))  # ⬅️ paciente
-    c9, c10 = st.columns([1, 1])
-    c9.radio("¿Atendido?", ["No", "Sí"], index=1, horizontal=True, key=K("atendido"))
-    c10.checkbox("Atención registrada en Panacea", key=K("reg_panacea"))       # ⬅️ atención
+    checks1, checks2, checks3 = st.columns([1, 1, 1])
+    checks1.checkbox("Paciente creado en Panacea", key=K("pac_creado_panacea"))  # paciente
+    checks2.checkbox("Paciente priorizado", key=K("pac_priorizado"))            # ⬅️ NUEVO
+    checks3.checkbox("Atención registrada en Panacea", key=K("reg_panacea"))     # atención
 
     c11, c12 = st.columns([1, 1])
     c11.selectbox("Tipo de contacto", options=["(No especifica)"] + TIPOS_CONTACTO, key=K("tipo_contacto"))
     c12.number_input("Duración de la atención (minutos, opcional)", min_value=0, max_value=480, step=5, key=K("duracion_minutos"))
+
+    c9, _ = st.columns([1, 3])
+    c9.radio("¿Atendido?", ["No", "Sí"], index=1, horizontal=True, key=K("atendido"))
 
     observaciones = st.text_area("Observaciones", key=K("observaciones"))
 
@@ -1107,6 +1122,7 @@ def ui_cargar_datos(auth_user: Optional[str]):
                     atendido=True if st.session_state[K("atendido")] == "Sí" else False,
                     registrado_panacea=bool(st.session_state[K("reg_panacea")]),          # atención
                     paciente_creado_panacea=bool(st.session_state[K("pac_creado_panacea")]),  # paciente
+                    paciente_priorizado=bool(st.session_state[K("pac_priorizado")]),       # ⬅️ nuevo
                     duracion_minutos=dur_val, tipo_contacto=tipo_contacto_val,
                     observaciones=observaciones, creado_por=auth_user,
                 )
@@ -1138,7 +1154,7 @@ def ui_cargar_datos(auth_user: Optional[str]):
 
         st.caption("**Obligatorias**: fecha, programa, convenio, institucion, profesional, documento, nombre, actividad. "
                    "**Opcionales**: departamento, municipio, localidad, atendido, registrado_panacea (atención), "
-                   "paciente_creado_panacea (paciente), tipo_contacto, duracion_minutos, observaciones, sexo, fecha_nacimiento, "
+                   "paciente_creado_panacea (paciente), paciente_priorizado, tipo_contacto, duracion_minutos, observaciones, sexo, fecha_nacimiento, "
                    "telefono, email, direccion, zona.")
 
         up = st.file_uploader("Archivo de atenciones", type=["xlsx", "xls", "csv"], key=KM("file"))
@@ -1170,7 +1186,8 @@ def ui_registros():
         "id","fecha","programa","convenio","institucion","profesor","actividad",
         "numero_paciente","nombre_paciente","tipo_contacto","duracion_minutos",
         "atendido",
-        "paciente_creado_panacea",   # ⬅️ nuevo visible
+        "paciente_priorizado",       # ⬅️ nuevo visible
+        "paciente_creado_panacea",   # visible
         "registrado_panacea",
         "pacientes_programados","pacientes_atendidos",
         "no_asistieron","tasa_atencion_%","observaciones","creado_por","creado_en","actualizado_en",
@@ -1206,6 +1223,7 @@ def ui_dashboard():
     prod_ph = (total_att / horas) if horas > 0 else 0.0
     total_pan = int(df.get("registrado_panacea", pd.Series()).fillna(0).sum()) if "registrado_panacea" in df.columns else 0
     total_pac_creados = int(df.get("paciente_creado_panacea", pd.Series()).fillna(0).sum()) if "paciente_creado_panacea" in df.columns else 0
+    total_priorizados = int(df.get("paciente_priorizado", pd.Series()).fillna(0).sum()) if "paciente_priorizado" in df.columns else 0
     brecha = total_att - total_pan
 
     k1, k2, k3, k4 = st.columns(4)
@@ -1220,11 +1238,12 @@ def ui_dashboard():
     k7.metric("Atenciones/hora", f"{prod_ph:.2f}")
     k8.metric("Atención en Panacea / brecha", f"{total_pan} / {brecha}")
 
-    k9, _ = st.columns([1, 3])
+    k9, k10 = st.columns([1, 1])
     k9.metric("Pacientes creados en Panacea (en registros)", f"{total_pac_creados:,}".replace(",", "."))
+    k10.metric("Pacientes priorizados", f"{total_priorizados:,}".replace(",", "."))
 
     tdf = (
-        df.groupby(pd.Grouper(key="fecha", freq="W"))[["pacientes_programados", "pacientes_atendidos"]]
+        df.groupby(pd.Grouper(key="fecha", freq="W"))[ ["pacientes_programados", "pacientes_atendidos"] ]
         .sum().reset_index()
     )
     st.plotly_chart(
@@ -1255,7 +1274,7 @@ def ui_dashboard():
         fig2b.update_layout(xaxis_tickangle=-40)
         st.plotly_chart(fig2b, use_container_width=True)
 
-    act_sum = df.groupby("actividad")[["pacientes_programados", "pacientes_atendidos"]].sum().reset_index()
+    act_sum = df.groupby("actividad")[ ["pacientes_programados", "pacientes_atendidos"] ].sum().reset_index()
     st.plotly_chart(
         px.bar(act_sum, x="actividad", y=["pacientes_programados", "pacientes_atendidos"], barmode="group", title="Por actividad"),
         use_container_width=True,
@@ -1282,6 +1301,7 @@ def ui_reportes():
              pacientes_atendidos=("pacientes_atendidos", "sum"),
              cargadas_panacea=("registrado_panacea", "sum"),
              pac_creados_panacea=("paciente_creado_panacea", "sum"),
+             priorizados=("paciente_priorizado", "sum"),
              minutos=("duracion_minutos", "sum"))
         .reset_index()
     )
@@ -1296,7 +1316,7 @@ def ui_reportes():
         df.groupby(["departamento", "municipio"], dropna=True)[["pacientes_programados", "pacientes_atendidos"]]
         .sum().reset_index()
     )
-    por_act = df.groupby("actividad")[["pacientes_programados", "pacientes_atendidos"]].sum().reset_index()
+    por_act = df.groupby("actividad")[ ["pacientes_programados", "pacientes_atendidos"] ].sum().reset_index()
 
     xls = to_excel_bytes({
         "Detalle": df,
