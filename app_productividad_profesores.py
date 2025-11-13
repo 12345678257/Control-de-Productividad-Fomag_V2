@@ -1,1790 +1,701 @@
-# app_productividad_Profesionales.py
-from datetime import datetime, date, time as dtime
-from typing import Optional, Dict, Any, List, Tuple
-import io
-import re
-import unicodedata
-import sqlite3
-import numpy as np
-import pandas as pd
-import plotly.express as px
+# app_productividad_profesores.py
+# Productividad de Profesionales · Rol Profesional / Administrativo
+# Ajuste: "Paciente priorizado" (UI + DB + Carga masiva de atenciones)
+# Streamlit 1.30+ (usa st.rerun)
+
 import streamlit as st
+import sqlite3, os, io
+import pandas as pd
+from datetime import datetime, date, time
 
 APP_TITLE = "Productividad de Profesionales"
-APP_ICON = "📊"
-DB_SQLITE_PATH = "productividad_Profesionales.db"
+DB_PATH = os.getenv("DB_FILE", "data.db")
 
-ACTIVIDADES_PLANTILLAS = [
+# ---------------------------------------------------------------------
+# Helpers de UI (claves únicas) y lectura robusta
+# ---------------------------------------------------------------------
+def k(ns: str, name: str) -> str:
+    """Genera una clave única para widgets."""
+    return f"{ns}__{name}"
+
+def read_table_file(uploaded):
+    """
+    Lee CSV/Excel con tolerancia de codificación.
+    Reglas:
+      - Si es Excel por extensión → pandas.read_excel
+      - Si es texto → intenta utf-8, latin-1, cp1252
+    """
+    if uploaded is None:
+        return None
+    name = (uploaded.name or "").lower()
+    # Excel por extensión
+    if name.endswith((".xlsx", ".xlsm", ".xls")):
+        return pd.read_excel(uploaded)
+    # CSV / texto
+    data = uploaded.read()
+    for enc in ("utf-8", "latin-1", "cp1252"):
+        try:
+            return pd.read_csv(io.BytesIO(data), encoding=enc)
+        except Exception:
+            try:
+                # Separador ; frecuente
+                return pd.read_csv(io.BytesIO(data), encoding=enc, sep=";")
+            except Exception:
+                continue
+    raise ValueError("No fue posible leer el archivo. Verifica delimitador/codificación.")
+
+# ---------------------------------------------------------------------
+# DB y Esquema (con migraciones simples)
+# ---------------------------------------------------------------------
+def db():
+    cx = sqlite3.connect(DB_PATH, check_same_thread=False)
+    cx.row_factory = sqlite3.Row
+    return cx
+
+def col_in_table(cx, table, col):
+    r = cx.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(x["name"] == col for x in r)
+
+def ensure_schema():
+    cx = db()
+    with cx:
+        # Usuarios (simple demo)
+        cx.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios(
+            username TEXT PRIMARY KEY,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('Admin','Profesional'))
+        )""")
+        # Pacientes
+        cx.execute("""
+        CREATE TABLE IF NOT EXISTS pacientes(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            documento TEXT UNIQUE NOT NULL,
+            nombre TEXT,
+            fecha_nacimiento TEXT,
+            sexo TEXT,
+            telefono TEXT,
+            email TEXT,
+            direccion TEXT,
+            localidad TEXT,
+            municipio TEXT,
+            departamento TEXT,
+            zona TEXT,
+            priorizado INTEGER DEFAULT 0
+        )""")
+        # Profesionales
+        cx.execute("""
+        CREATE TABLE IF NOT EXISTS profesionales(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            documento TEXT UNIQUE NOT NULL,
+            nombre TEXT,
+            telefono TEXT,
+            email TEXT,
+            programa TEXT,
+            convenio TEXT
+        )""")
+        # Instituciones
+        cx.execute("""
+        CREATE TABLE IF NOT EXISTS instituciones(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT UNIQUE NOT NULL,
+            departamento TEXT,
+            municipio TEXT,
+            localidad TEXT
+        )""")
+        # Atenciones
+        cx.execute("""
+        CREATE TABLE IF NOT EXISTS atenciones(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT,
+            programa TEXT,
+            convenio TEXT,
+            institucion TEXT,
+            departamento TEXT,
+            municipio TEXT,
+            localidad TEXT,
+            profesional TEXT,
+            documento TEXT,
+            nombre TEXT,
+            actividad TEXT,
+            atendido INTEGER DEFAULT 0,
+            registrado_panacea INTEGER DEFAULT 0,
+            paciente_creado_panacea INTEGER DEFAULT 0,
+            paciente_priorizado INTEGER DEFAULT 0,
+            tipo_contacto TEXT,
+            duracion_minutos INTEGER,
+            observaciones TEXT,
+            sexo TEXT,
+            fecha_nacimiento TEXT,
+            telefono TEXT,
+            email TEXT,
+            direccion TEXT,
+            zona TEXT
+        )""")
+        # Viáticos
+        cx.execute("""
+        CREATE TABLE IF NOT EXISTS viaticos(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            requiere INTEGER DEFAULT 0,
+            origen TEXT,
+            destino TEXT,
+            valor REAL,
+            observaciones TEXT,
+            fecha TEXT
+        )""")
+        # Planificador
+        cx.execute("""
+        CREATE TABLE IF NOT EXISTS planificador(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            fecha TEXT,
+            hora_ini TEXT,
+            hora_fin TEXT,
+            titulo TEXT,
+            descripcion TEXT,
+            programa TEXT,
+            convenio TEXT,
+            institucion TEXT
+        )""")
+        # Papelería
+        cx.execute("""
+        CREATE TABLE IF NOT EXISTS papeleria(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            item TEXT,
+            cantidad INTEGER,
+            estado TEXT, -- Solicitado|Aprobado|Entregado
+            observaciones TEXT,
+            fecha TEXT
+        )""")
+        # Migraciones seguras (por si ya existían tablas)
+        # Pacientes: priorizado
+        if not col_in_table(cx, "pacientes", "priorizado"):
+            cx.execute("ALTER TABLE pacientes ADD COLUMN priorizado INTEGER DEFAULT 0")
+        # Atenciones: paciente_priorizado
+        if not col_in_table(cx, "atenciones", "paciente_priorizado"):
+            cx.execute("ALTER TABLE atenciones ADD COLUMN paciente_priorizado INTEGER DEFAULT 0")
+        # Usuarios demo
+        if not cx.execute("SELECT 1 FROM usuarios WHERE username='admin'").fetchone():
+            cx.execute("INSERT INTO usuarios(username,password,role) VALUES('admin','admin123','Admin')")
+        if not cx.execute("SELECT 1 FROM usuarios WHERE username='pro'").fetchone():
+            cx.execute("INSERT INTO usuarios(username,password,role) VALUES('pro','pro123','Profesional')")
+
+# ---------------------------------------------------------------------
+# Repos/Servicios
+# ---------------------------------------------------------------------
+def get_paciente(documento:str):
+    cx = db()
+    r = cx.execute("SELECT * FROM pacientes WHERE documento=?", (documento,)).fetchone()
+    return r
+
+def upsert_paciente(row:dict):
+    """
+    row keys esperadas:
+    documento, nombre, fecha_nacimiento, sexo, telefono, email,
+    direccion, localidad, municipio, departamento, zona, priorizado
+    """
+    cx = db()
+    with cx:
+        cur = cx.execute("SELECT id FROM pacientes WHERE documento=?", (row["documento"],)).fetchone()
+        vals = (
+            row.get("nombre"),
+            row.get("fecha_nacimiento"),
+            row.get("sexo"),
+            row.get("telefono"),
+            row.get("email"),
+            row.get("direccion"),
+            row.get("localidad"),
+            row.get("municipio"),
+            row.get("departamento"),
+            row.get("zona"),
+            int(row.get("priorizado") or 0),
+            row["documento"]
+        )
+        if cur:
+            cx.execute("""UPDATE pacientes SET
+                nombre=?, fecha_nacimiento=?, sexo=?, telefono=?, email=?,
+                direccion=?, localidad=?, municipio=?, departamento=?, zona=?,
+                priorizado=?
+                WHERE documento=?""", vals)
+        else:
+            cx.execute("""INSERT INTO pacientes(
+                documento, nombre, fecha_nacimiento, sexo, telefono, email,
+                direccion, localidad, municipio, departamento, zona, priorizado
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                row["documento"], row.get("nombre"), row.get("fecha_nacimiento"),
+                row.get("sexo"), row.get("telefono"), row.get("email"),
+                row.get("direccion"), row.get("localidad"), row.get("municipio"),
+                row.get("departamento"), row.get("zona"), int(row.get("priorizado") or 0)
+            ))
+
+def insert_atencion(a:dict):
+    cx = db()
+    with cx:
+        cx.execute("""INSERT INTO atenciones(
+            fecha, programa, convenio, institucion, departamento, municipio, localidad,
+            profesional, documento, nombre, actividad, atendido, registrado_panacea,
+            paciente_creado_panacea, paciente_priorizado, tipo_contacto, duracion_minutos,
+            observaciones, sexo, fecha_nacimiento, telefono, email, direccion, zona
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            a.get("fecha"), a.get("programa"), a.get("convenio"), a.get("institucion"),
+            a.get("departamento"), a.get("municipio"), a.get("localidad"),
+            a.get("profesional"), a.get("documento"), a.get("nombre"), a.get("actividad"),
+            int(a.get("atendido") or 0), int(a.get("registrado_panacea") or 0),
+            int(a.get("paciente_creado_panacea") or 0), int(a.get("paciente_priorizado") or 0),
+            a.get("tipo_contacto"), int(a.get("duracion_minutos") or 0),
+            a.get("observaciones"), a.get("sexo"), a.get("fecha_nacimiento"),
+            a.get("telefono"), a.get("email"), a.get("direccion"), a.get("zona")
+        ))
+
+# ---------------------------------------------------------------------
+# UI: Login
+# ---------------------------------------------------------------------
+def ui_login():
+    st.subheader("Ingreso")
+    u = st.text_input("Usuario", key=k("login","user"))
+    p = st.text_input("Contraseña", type="password", key=k("login","pass"))
+    if st.button("Ingresar", key=k("login","btn")):
+        cx = db()
+        row = cx.execute(
+            "SELECT * FROM usuarios WHERE username=? AND password=?", (u, p)
+        ).fetchone()
+        if row:
+            st.session_state["user"] = dict(row)
+            st.success(f"Bienvenido {row['username']} · Rol {row['role']}")
+            st.rerun()
+        else:
+            st.error("Credenciales inválidas")
+
+# ---------------------------------------------------------------------
+# UI: Registrar atenciones (incluye Paciente priorizado)
+# ---------------------------------------------------------------------
+ACTIVIDADES = [
     "VALORACION INICIAL POR PSICOLOGIA",
     "CONTIGO PROFE EN AULA",
     "PRIMEROS AUXILIOS PSICOLOGICO",
-    "APOYO TERAPEUTICO Y SEGUIMIENTO",
+    "APOYO TERAPEUTICO Y SEGUIMIENTO"
 ]
-TIPOS_CONTACTO = ["Presencial", "Virtual", "Telefónico", "Otro"]
-
-# Usuarios demo
-USERS = {
-    "admin": {"password": "admin123", "role": "admin"},
-    "pro": {"password": "pro123", "role": "profesional"},
-}
-
-st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
-
-# ---------------- LECTURA ROBUSTA CSV/EXCEL ----------------
-def _slug_col(s: str) -> str:
-    if s is None:
-        return ""
-    s = str(s).replace("\ufeff", "")  # BOM
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    s = s.lower().strip()
-    s = re.sub(r"[^a-z0-9]+", "_", s)
-    return s.strip("_")
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [_slug_col(c) for c in df.columns]
-    synonyms = {
-        # generales
-        "num_documento": "documento",
-        "numero_documento": "documento",
-        "nro_documento": "documento",
-        "identificacion": "documento",
-        "identificación": "documento",
-        "cedula": "documento",
-        "c_c": "documento",
-        "nombre_completo": "nombre",
-        "correo": "email",
-        "correo_electronico": "email",
-        "telefono_contacto": "telefono",
-        "teléfono": "telefono",
-        "dirección": "direccion",
-        "fecha_de_nacimiento": "fecha_nacimiento",
-        "zona_geografica": "zona",
-        "actividad_plantilla": "actividad",
-        "duracion": "duracion_minutos",
-        "duracion_min": "duracion_minutos",
-        "atendio": "atendido",
-        "asistio": "atendido",
-
-        # atención registrada en Panacea (NO es el paciente)
-        "registrado_en_panacea": "registrado_panacea",
-        "en_panacea": "registrado_panacea",
-        "atencion_en_panacea": "registrado_panacea",
-        "atencion_registrada_panacea": "registrado_panacea",
-
-        # paciente creado en Panacea (nuevo)
-        "paciente_en_panacea": "paciente_creado_panacea",
-        "paciente_creado_panacea": "paciente_creado_panacea",
-        "creado_panacea": "paciente_creado_panacea",
-        "paciente_creado": "paciente_creado_panacea",
-    }
-    df = df.rename(columns={c: synonyms.get(c, c) for c in df.columns})
-
-    if "nombre" not in df.columns and ("nombres" in df.columns or "apellidos" in df.columns):
-        n = df["nombres"].astype(str) if "nombres" in df.columns else ""
-        a = df["apellidos"].astype(str) if "apellidos" in df.columns else ""
-        df["nombre"] = (n.fillna("") + " " + a.fillna("")).str.strip().replace("", pd.NA)
-
-    for key_col in ("documento", "nombre"):
-        if key_col in df.columns:
-            df[key_col] = (
-                df[key_col].astype(str).str.replace("\u200b", "", regex=False).str.strip()
-            )
-    return df
-
-def read_table_upload(uploaded_file) -> pd.DataFrame:
-    name = uploaded_file.name.lower()
-    raw = uploaded_file.getvalue()
-
-    if name.endswith((".xlsx", ".xls")):
-        df = pd.read_excel(io.BytesIO(raw))
-        return normalize_columns(df)
-
-    last_err = None
-    encodings = ("utf-8", "utf-8-sig", "cp1252", "latin1")
-    seps = (None, ",", ";")
-    for enc in encodings:
-        for sep in seps:
-            try:
-                df = pd.read_csv(io.BytesIO(raw), encoding=enc, sep=sep, engine="python")
-                if df.shape[1] == 1 and sep is None:
-                    try:
-                        df2 = pd.read_csv(io.BytesIO(raw), encoding=enc, sep=";", engine="python")
-                        if df2.shape[1] > 1:
-                            df = df2
-                    except Exception:
-                        pass
-                return normalize_columns(df)
-            except Exception as e:
-                last_err = e
-
-    try:
-        txt = raw.decode("cp1252", errors="replace")
-        df = pd.read_csv(io.StringIO(txt), sep=None, engine="python")
-        return normalize_columns(df)
-    except Exception:
-        pass
-
-    raise last_err
-
-# ---------------- UTIL ----------------
-def _now() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-def success_toast(msg: str) -> None:
-    st.toast(msg, icon="✅")
-
-def warn_toast(msg: str) -> None:
-    st.toast(msg, icon="⚠️")
-
-def error_toast(msg: str) -> None:
-    st.toast(msg, icon="❌")
-
-def str2bool(x) -> Optional[bool]:
-    if x is None or (isinstance(x, float) and np.isnan(x)):
-        return None
-    s = str(x).strip().lower()
-    if s in ("si", "sí", "true", "1", "x", "si.", "sí."):
-        return True
-    if s in ("no", "false", "0", ""):
-        return False
-    return None
-
-def safe_int(x) -> Optional[int]:
-    try:
-        if x is None or (isinstance(x, float) and np.isnan(x)):
-            return None
-        return int(str(x).strip())
-    except Exception:
-        return None
-
-# ---------------- DB ----------------
-def get_sqlite_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_SQLITE_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
-
-SQLITE_CONN = get_sqlite_conn()
-
-SQLITE_DDL = {
-    "programas": """
-    CREATE TABLE IF NOT EXISTS programas(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT UNIQUE NOT NULL,
-        activo INTEGER DEFAULT 1
-    );
-    """,
-    "convenios": """
-    CREATE TABLE IF NOT EXISTS convenios(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT NOT NULL,
-        programa_id INTEGER NOT NULL,
-        activo INTEGER DEFAULT 1,
-        UNIQUE(nombre, programa_id),
-        FOREIGN KEY(programa_id) REFERENCES programas(id)
-    );
-    """,
-    "instituciones": """
-    CREATE TABLE IF NOT EXISTS instituciones(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT NOT NULL,
-        localidad TEXT,
-        municipio TEXT,
-        departamento TEXT,
-        activo INTEGER DEFAULT 1,
-        UNIQUE(nombre, municipio, departamento)
-    );
-    """,
-    "Profesionales": """
-    CREATE TABLE IF NOT EXISTS Profesionales(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT NOT NULL,
-        documento TEXT,
-        email TEXT,
-        programa_id INTEGER,
-        convenio_id INTEGER,
-        zona TEXT,
-        activo INTEGER DEFAULT 1,
-        FOREIGN KEY(programa_id) REFERENCES programas(id),
-        FOREIGN KEY(convenio_id) REFERENCES convenios(id)
-    );
-    """,
-    "pacientes": """
-    CREATE TABLE IF NOT EXISTS pacientes(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        numero_documento TEXT UNIQUE NOT NULL,
-        nombre TEXT NOT NULL,
-        fecha_nacimiento TEXT,
-        sexo TEXT,
-        telefono TEXT,
-        email TEXT,
-        direccion TEXT,
-        localidad TEXT,
-        municipio TEXT,
-        departamento TEXT,
-        zona TEXT,
-        activo INTEGER DEFAULT 1
-    );
-    """,
-    "registros": """
-    CREATE TABLE IF NOT EXISTS registros(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fecha TEXT NOT NULL,
-        programa_id INTEGER NOT NULL,
-        convenio_id INTEGER NOT NULL,
-        institucion_id INTEGER NOT NULL,
-        Profesional_id INTEGER NOT NULL,
-        paciente_id INTEGER,
-        localidad TEXT,
-        municipio TEXT,
-        departamento TEXT,
-        numero_paciente TEXT,
-        nombre_paciente TEXT,
-        actividad TEXT,
-        atendido INTEGER,
-        registrado_panacea INTEGER,           -- atención registrada (NO el paciente)
-        paciente_creado_panacea INTEGER,      -- ⬅️ NUEVO: paciente creado en Panacea
-        duracion_minutos INTEGER,
-        tipo_contacto TEXT,
-        pacientes_programados INTEGER NOT NULL,
-        pacientes_atendidos INTEGER NOT NULL,
-        observaciones TEXT,
-        creado_por TEXT,
-        creado_en TEXT,
-        actualizado_en TEXT,
-        FOREIGN KEY(programa_id) REFERENCES programas(id),
-        FOREIGN KEY(convenio_id) REFERENCES convenios(id),
-        FOREIGN KEY(institucion_id) REFERENCES instituciones(id),
-        FOREIGN KEY(Profesional_id) REFERENCES Profesionales(id),
-        FOREIGN KEY(paciente_id) REFERENCES pacientes(id)
-    );
-    """,
-    "viaticos": """
-    CREATE TABLE IF NOT EXISTS viaticos(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fecha TEXT NOT NULL,
-        programa_id INTEGER,
-        convenio_id INTEGER,
-        institucion_id INTEGER,
-        Profesional_id INTEGER,
-        requiere_viatico INTEGER NOT NULL,
-        origen TEXT,
-        destino TEXT,
-        valor REAL,
-        observaciones TEXT,
-        creado_por TEXT,
-        creado_en TEXT,
-        actualizado_en TEXT,
-        FOREIGN KEY(programa_id) REFERENCES programas(id),
-        FOREIGN KEY(convenio_id) REFERENCES convenios(id),
-        FOREIGN KEY(institucion_id) REFERENCES instituciones(id),
-        FOREIGN KEY(Profesional_id) REFERENCES Profesionales(id)
-    );
-    """,
-    "agenda": """
-    CREATE TABLE IF NOT EXISTS agenda(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fecha TEXT NOT NULL,
-        hora_inicio TEXT,
-        hora_fin TEXT,
-        titulo TEXT NOT NULL,
-        descripcion TEXT,
-        programa_id INTEGER,
-        convenio_id INTEGER,
-        institucion_id INTEGER,
-        Profesional_id INTEGER,
-        creado_por TEXT,
-        creado_en TEXT,
-        actualizado_en TEXT,
-        FOREIGN KEY(programa_id) REFERENCES programas(id),
-        FOREIGN KEY(convenio_id) REFERENCES convenios(id),
-        FOREIGN KEY(institucion_id) REFERENCES instituciones(id),
-        FOREIGN KEY(Profesional_id) REFERENCES Profesionales(id)
-    );
-    """,
-    "papeleria": """
-    CREATE TABLE IF NOT EXISTS papeleria(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fecha TEXT NOT NULL,
-        programa_id INTEGER,
-        convenio_id INTEGER,
-        institucion_id INTEGER,
-        Profesional_id INTEGER,
-        item TEXT NOT NULL,
-        cantidad INTEGER,
-        estado TEXT,
-        observaciones TEXT,
-        creado_por TEXT,
-        creado_en TEXT,
-        actualizado_en TEXT,
-        FOREIGN KEY(programa_id) REFERENCES programas(id),
-        FOREIGN KEY(convenio_id) REFERENCES convenios(id),
-        FOREIGN KEY(institucion_id) REFERENCES instituciones(id),
-        FOREIGN KEY(Profesional_id) REFERENCES Profesionales(id)
-    );
-    """,
-}
-
-def ensure_sqlite_schema():
-    with SQLITE_CONN:
-        for ddl in SQLITE_DDL.values():
-            SQLITE_CONN.execute(ddl)
-        # Migraciones suaves
-        cur = SQLITE_CONN.execute("PRAGMA table_info(registros);")
-        have = {r["name"] for r in cur.fetchall()}
-        add_cols = {
-            "numero_paciente": "ALTER TABLE registros ADD COLUMN numero_paciente TEXT;",
-            "nombre_paciente": "ALTER TABLE registros ADD COLUMN nombre_paciente TEXT;",
-            "actividad": "ALTER TABLE registros ADD COLUMN actividad TEXT;",
-            "atendido": "ALTER TABLE registros ADD COLUMN atendido INTEGER;",
-            "registrado_panacea": "ALTER TABLE registros ADD COLUMN registrado_panacea INTEGER;",
-            "paciente_creado_panacea": "ALTER TABLE registros ADD COLUMN paciente_creado_panacea INTEGER;",  # NUEVO
-            "duracion_minutos": "ALTER TABLE registros ADD COLUMN duracion_minutos INTEGER;",
-            "tipo_contacto": "ALTER TABLE registros ADD COLUMN tipo_contacto TEXT;",
-            "paciente_id": "ALTER TABLE registros ADD COLUMN paciente_id INTEGER;",
-        }
-        for c, stmt in add_cols.items():
-            if c not in have:
-                SQLITE_CONN.execute(stmt)
-
-ensure_sqlite_schema()
-
-# ---------------- DAO ----------------
-class DataAccess:
-    def __init__(self, conn: sqlite3.Connection):
-        self.db = conn
-
-    # Helpers name->id
-    def programa_id_by_name(self, nombre: str) -> Optional[int]:
-        if not nombre: return None
-        r = self.db.execute("SELECT id FROM programas WHERE nombre=? AND activo=1", (nombre,)).fetchone()
-        return int(r["id"]) if r else None
-
-    def convenio_id_by_name(self, nombre: str, programa_id: Optional[int]) -> Optional[int]:
-        if not nombre or not programa_id: return None
-        r = self.db.execute(
-            "SELECT id FROM convenios WHERE nombre=? AND programa_id=? AND activo=1",
-            (nombre, programa_id),
-        ).fetchone()
-        return int(r["id"]) if r else None
-
-    def institucion_id_by_name_geo(
-        self, nombre: str, municipio: Optional[str], departamento: Optional[str]
-    ) -> Optional[int]:
-        if not nombre: return None
-        if municipio and departamento:
-            r = self.db.execute(
-                "SELECT id FROM instituciones WHERE nombre=? AND municipio=? AND departamento=? AND activo=1",
-                (nombre, municipio, departamento),
-            ).fetchone()
-            if r: return int(r["id"])
-        r = self.db.execute(
-            "SELECT id FROM instituciones WHERE nombre=? AND activo=1 ORDER BY id ASC",
-            (nombre,),
-        ).fetchone()
-        return int(r["id"]) if r else None
-
-    def Profesional_id_by_name(self, nombre: str, programa_id: Optional[int], convenio_id: Optional[int]) -> Optional[int]:
-        if not nombre: return None
-        r = self.db.execute(
-            "SELECT id FROM Profesionales WHERE nombre=? AND activo=1 ORDER BY id ASC",
-            (nombre,),
-        ).fetchone()
-        return int(r["id"]) if r else None
-
-    # CRUD básicos
-    def list_programas(self) -> pd.DataFrame:
-        return pd.read_sql_query("SELECT * FROM programas WHERE activo=1 ORDER BY nombre", self.db)
-
-    def upsert_programa(self, nombre: str) -> int:
-        if not nombre: return None
-        with self.db:
-            self.db.execute("INSERT OR IGNORE INTO programas(nombre,activo) VALUES(?,1)", (nombre.strip(),))
-        r = self.db.execute("SELECT id FROM programas WHERE nombre=?", (nombre.strip(),)).fetchone()
-        return int(r["id"])
-
-    def list_convenios(self, programa_id: Optional[int] = None) -> pd.DataFrame:
-        q = "SELECT * FROM convenios WHERE activo=1"
-        p: List[Any] = []
-        if programa_id:
-            q += " AND programa_id=?"
-            p.append(programa_id)
-        q += " ORDER BY nombre"
-        return pd.read_sql_query(q, self.db, params=p)
-
-    def upsert_convenio(self, nombre: str, programa_id: int) -> int:
-        if not (nombre and programa_id): return None
-        with self.db:
-            self.db.execute(
-                "INSERT OR IGNORE INTO convenios(nombre,programa_id,activo) VALUES(?,?,1)",
-                (nombre.strip(), programa_id),
-            )
-        r = self.db.execute(
-            "SELECT id FROM convenios WHERE nombre=? AND programa_id=?", (nombre.strip(), programa_id)
-        ).fetchone()
-        return int(r["id"])
-
-    def list_instituciones(self) -> pd.DataFrame:
-        return pd.read_sql_query(
-            "SELECT * FROM instituciones WHERE activo=1 ORDER BY departamento, municipio, nombre", self.db
-        )
-
-    def upsert_institucion(self, nombre: str, localidad: Optional[str], municipio: Optional[str], departamento: Optional[str]) -> int:
-        if not nombre: return None
-        with self.db:
-            self.db.execute(
-                "INSERT OR IGNORE INTO instituciones(nombre,localidad,municipio,departamento,activo) VALUES(?,?,?,?,1)",
-                (nombre.strip(), (localidad or None), (municipio or None), (departamento or None)),
-            )
-        r = self.db.execute(
-            "SELECT id FROM instituciones WHERE nombre=? ORDER BY id ASC", (nombre.strip(),)
-        ).fetchone()
-        return int(r["id"])
-
-    def list_Profesionales(self, programa_id: Optional[int] = None, convenio_id: Optional[int] = None) -> pd.DataFrame:
-        q = "SELECT * FROM Profesionales WHERE activo=1"
-        p: List[Any] = []
-        if programa_id:
-            q += " AND programa_id=?"; p.append(programa_id)
-        if convenio_id:
-            q += " AND convenio_id=?"; p.append(convenio_id)
-        q += " ORDER BY nombre"
-        return pd.read_sql_query(q, self.db, params=p)
-
-    def upsert_Profesional(
-        self, nombre: str, documento: Optional[str], email: Optional[str],
-        programa_id: Optional[int], convenio_id: Optional[int], zona: Optional[str]
-    ) -> int:
-        if not nombre: return None
-        with self.db:
-            self.db.execute(
-                "INSERT INTO Profesionales(nombre,documento,email,programa_id,convenio_id,zona,activo) VALUES(?,?,?,?,?,?,1)",
-                (nombre.strip(), (documento or None), (email or None), programa_id, convenio_id, zona),
-            )
-        r = self.db.execute("SELECT id FROM Profesionales WHERE nombre=? ORDER BY id DESC", (nombre.strip(),)).fetchone()
-        return int(r["id"])
-
-    def list_pacientes(self) -> pd.DataFrame:
-        return pd.read_sql_query("SELECT * FROM pacientes WHERE activo=1 ORDER BY nombre", self.db)
-
-    def get_paciente_por_documento(self, doc: str) -> Optional[Dict[str, Any]]:
-        doc = (doc or "").strip()
-        if not doc: return None
-        row = self.db.execute("SELECT * FROM pacientes WHERE numero_documento=? AND activo=1", (doc,)).fetchone()
-        return dict(row) if row else None
-
-    def upsert_paciente(
-        self, numero_documento: str, nombre: str,
-        fecha_nacimiento=None, sexo=None, telefono=None, email=None,
-        direccion=None, localidad=None, municipio=None, departamento=None, zona=None
-    ) -> int:
-        numero_documento = (numero_documento or "").strip()
-        nombre = (nombre or "").strip()
-        if not numero_documento or not nombre:
-            raise ValueError("Documento y nombre del paciente son obligatorios")
-        row = self.db.execute("SELECT id FROM pacientes WHERE numero_documento=?", (numero_documento)).fetchone()
-        # Fix param tuple for sqlite
-        if row is None:
-            row = self.db.execute("SELECT id FROM pacientes WHERE numero_documento=?", (numero_documento,)).fetchone()
-        if row:
-            pid = int(row["id"])
-            with self.db:
-                self.db.execute(
-                    """UPDATE pacientes
-                       SET nombre=?, fecha_nacimiento=?, sexo=?, telefono=?, email=?,
-                           direccion=?, localidad=?, municipio=?, departamento=?, zona=?
-                     WHERE id=?""",
-                    (nombre, fecha_nacimiento, sexo, telefono, email, direccion, localidad, municipio, departamento, zona, pid),
-                )
-            return pid
-        with self.db:
-            cur = self.db.execute(
-                """INSERT INTO pacientes(
-                       numero_documento, nombre, fecha_nacimiento, sexo, telefono, email,
-                       direccion, localidad, municipio, departamento, zona, activo
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)""",
-                (numero_documento, nombre, fecha_nacimiento, sexo, telefono, email, direccion, localidad, municipio, departamento, zona),
-            )
-        return int(cur.lastrowid)
-
-    def insert_registro(
-        self, fecha: date, programa_id: int, convenio_id: int, institucion_id: int, Profesional_id: int,
-        paciente_id: Optional[int], localidad, municipio, departamento, numero_paciente, nombre_paciente,
-        actividad, atendido, registrado_panacea, paciente_creado_panacea, duracion_minutos, tipo_contacto, observaciones, creado_por
-    ) -> None:
-        row = {
-            "fecha": fecha.strftime("%Y-%m-%d") if isinstance(fecha, date) else str(fecha),
-            "programa_id": programa_id,
-            "convenio_id": convenio_id,
-            "institucion_id": institucion_id,
-            "Profesional_id": Profesional_id,
-            "paciente_id": paciente_id,
-            "localidad": localidad,
-            "municipio": municipio,
-            "departamento": departamento,
-            "numero_paciente": (numero_paciente or "").strip() or None,
-            "nombre_paciente": (nombre_paciente or "").strip() or None,
-            "actividad": actividad,
-            "atendido": 1 if atendido else 0,
-            "registrado_panacea": 1 if registrado_panacea else 0,          # atención
-            "paciente_creado_panacea": 1 if paciente_creado_panacea else 0, # paciente
-            "duracion_minutos": int(duracion_minutos) if duracion_minutos is not None else None,
-            "tipo_contacto": tipo_contacto,
-            "pacientes_programados": 1,
-            "pacientes_atendidos": 1 if atendido else 0,
-            "observaciones": observaciones,
-            "creado_por": creado_por,
-            "creado_en": _now(),
-            "actualizado_en": _now(),
-        }
-        cols = ",".join(row.keys())
-        ph = ",".join(["?"] * len(row))
-        with self.db:
-            self.db.execute(f"INSERT INTO registros ({cols}) VALUES ({ph})", tuple(row.values()))
-
-    def list_registros(self, filtros: Dict[str, Any]) -> pd.DataFrame:
-        q = (
-            "SELECT r.*, p.nombre AS programa, c.nombre AS convenio, "
-            "i.nombre AS institucion, f.nombre AS Profesional, f.email AS Profesional_email "
-            "FROM registros r "
-            "LEFT JOIN programas p ON p.id=r.programa_id "
-            "LEFT JOIN convenios c ON c.id=r.convenio_id "
-            "LEFT JOIN instituciones i ON i.id=r.institucion_id "
-            "LEFT JOIN Profesionales f ON f.id=r.Profesional_id "
-            "WHERE 1=1 "
-        )
-        params: List[Any] = []
-        if filtros.get("fecha_desde"):
-            q += " AND date(r.fecha)>=date(?)"
-            params.append(filtros["fecha_desde"].strftime("%Y-%m-%d"))
-        if filtros.get("fecha_hasta"):
-            q += " AND date(r.fecha)<=date(?)"
-            params.append(filtros["fecha_hasta"].strftime("%Y-%m-%d"))
-        for k in ["programa_id", "convenio_id", "Profesional_id"]:
-            if filtros.get(k):
-                q += f" AND r.{k}=?"; params.append(filtros[k])
-        if filtros.get("actividad"):
-            q += " AND r.actividad=?"; params.append(filtros["actividad"])
-        q += " ORDER BY r.fecha DESC, r.id DESC"
-
-        df = pd.read_sql_query(q, self.db, params=params)
-        if not df.empty:
-            df["pacientes_programados"] = df["pacientes_programados"].fillna(0)
-            df["pacientes_atendidos"] = df["pacientes_atendidos"].fillna(0)
-            df["no_asistieron"] = df["pacientes_programados"] - df["pacientes_atendidos"]
-            df["tasa_atencion"] = np.where(
-                df["pacientes_programados"] > 0,
-                df["pacientes_atendidos"] / df["pacientes_programados"],
-                np.nan,
-            )
-        return df
-
-    def delete_registro(self, rid: int) -> None:
-        with self.db:
-            self.db.execute("DELETE FROM registros WHERE id=?", (rid,))
-
-    def update_registro(self, rid: int, updates: Dict[str, Any]) -> None:
-        updates = dict(updates)
-        updates["actualizado_en"] = _now()
-        sets = ",".join([f"{k}=?" for k in updates.keys()])
-        with self.db:
-            self.db.execute(f"UPDATE registros SET {sets} WHERE id=?", (*updates.values(), rid))
-
-    # Viáticos
-    def insert_viatico(self, fecha: date, programa_id, convenio_id, institucion_id, Profesional_id,
-                       requiere_viatico, origen, destino, valor, observaciones, creado_por) -> None:
-        row = {
-            "fecha": fecha.strftime("%Y-%m-%d"),
-            "programa_id": programa_id,
-            "convenio_id": convenio_id,
-            "institucion_id": institucion_id,
-            "Profesional_id": Profesional_id,
-            "requiere_viatico": 1 if requiere_viatico else 0,
-            "origen": origen,
-            "destino": destino,
-            "valor": float(valor) if valor is not None else None,
-            "observaciones": observaciones,
-            "creado_por": creado_por,
-            "creado_en": _now(),
-            "actualizado_en": _now(),
-        }
-        cols = ",".join(row.keys()); ph = ",".join(["?"] * len(row))
-        with self.db:
-            self.db.execute(f"INSERT INTO viaticos ({cols}) VALUES ({ph})", tuple(row.values()))
-
-    def list_viaticos(self, filtros: Dict[str, Any]) -> pd.DataFrame:
-        q = (
-            "SELECT v.*, p.nombre AS programa, c.nombre AS convenio, "
-            "i.nombre AS institucion, f.nombre AS Profesional "
-            "FROM viaticos v "
-            "LEFT JOIN programas p ON p.id=v.programa_id "
-            "LEFT JOIN convenios c ON c.id=v.convenio_id "
-            "LEFT JOIN instituciones i ON i.id=v.institucion_id "
-            "LEFT JOIN Profesionales f ON f.id=v.Profesional_id "
-            "WHERE 1=1 "
-        )
-        params: List[Any] = []
-        if filtros.get("fecha_desde"):
-            q += " AND date(v.fecha)>=date(?)"; params.append(filtros["fecha_desde"].strftime("%Y-%m-%d"))
-        if filtros.get("fecha_hasta"):
-            q += " AND date(v.fecha)<=date(?)"; params.append(filtros["fecha_hasta"].strftime("%Y-%m-%d"))
-        for k in ["programa_id", "convenio_id", "Profesional_id"]:
-            if filtros.get(k):
-                q += f" AND v.{k}=?"; params.append(filtros[k])
-        q += " ORDER BY v.fecha DESC, v.id DESC"
-        return pd.read_sql_query(q, self.db, params=params)
-
-    def delete_viatico(self, vid: int) -> None:
-        with self.db:
-            self.db.execute("DELETE FROM viaticos WHERE id=?", (vid,))
-
-    # Agenda
-    def insert_agenda_event(self, fecha: date, hi: Optional[dtime], hf: Optional[dtime], titulo: str, descripcion,
-                            programa_id, convenio_id, institucion_id, Profesional_id, creado_por) -> None:
-        row = {
-            "fecha": fecha.strftime("%Y-%m-%d"),
-            "hora_inicio": hi.strftime("%H:%M") if hi else None,
-            "hora_fin": hf.strftime("%H:%M") if hf else None,
-            "titulo": titulo.strip(),
-            "descripcion": descripcion,
-            "programa_id": programa_id,
-            "convenio_id": convenio_id,
-            "institucion_id": institucion_id,
-            "Profesional_id": Profesional_id,
-            "creado_por": creado_por,
-            "creado_en": _now(),
-            "actualizado_en": _now(),
-        }
-        cols = ",".join(row.keys()); ph = ",".join(["?"] * len(row))
-        with self.db:
-            self.db.execute(f"INSERT INTO agenda ({cols}) VALUES ({ph})", tuple(row.values()))
-
-    def list_agenda(self, filtros: Dict[str, Any]) -> pd.DataFrame:
-        q = (
-            "SELECT a.*, p.nombre AS programa, c.nombre AS convenio, "
-            "i.nombre AS institucion, f.nombre AS Profesional "
-            "FROM agenda a "
-            "LEFT JOIN programas p ON p.id=a.programa_id "
-            "LEFT JOIN convenios c ON c.id=a.convenio_id "
-            "LEFT JOIN instituciones i ON i.id=a.institucion_id "
-            "LEFT JOIN Profesionales f ON f.id=a.Profesional_id "
-            "WHERE 1=1 "
-        )
-        params: List[Any] = []
-        if filtros.get("fecha_desde"):
-            q += " AND date(a.fecha)>=date(?)"; params.append(filtros["fecha_desde"].strftime("%Y-%m-%d"))
-        if filtros.get("fecha_hasta"):
-            q += " AND date(a.fecha)<=date(?)"; params.append(filtros["fecha_hasta"].strftime("%Y-%m-%d"))
-        for k in ["programa_id", "convenio_id", "Profesional_id"]:
-            if filtros.get(k):
-                q += f" AND a.{k}=?"; params.append(filtros[k])
-        q += " ORDER BY a.fecha ASC, a.hora_inicio ASC"
-        return pd.read_sql_query(q, self.db, params=params)
-
-    def get_agenda_by_id(self, eid: int) -> Optional[Dict[str, Any]]:
-        r = self.db.execute("SELECT * FROM agenda WHERE id=?", (eid,)).fetchone()
-        return dict(r) if r else None
-
-    def update_agenda_event(self, eid: int, updates: Dict[str, Any]) -> None:
-        updates = dict(updates); updates["actualizado_en"] = _now()
-        sets = ",".join([f"{k}=?" for k in updates.keys()])
-        with self.db:
-            self.db.execute(f"UPDATE agenda SET {sets} WHERE id=?", (*updates.values(), eid))
-
-    def delete_agenda_event(self, eid: int) -> None:
-        with self.db:
-            self.db.execute("DELETE FROM agenda WHERE id=?", (eid,))
-
-    # Papelería
-    def insert_papeleria(self, fecha: date, programa_id, convenio_id, institucion_id, Profesional_id,
-                         item: str, cantidad: Optional[int], estado: str, observaciones: Optional[str], creado_por: str) -> None:
-        row = {
-            "fecha": fecha.strftime("%Y-%m-%d"),
-            "programa_id": programa_id,
-            "convenio_id": convenio_id,
-            "institucion_id": institucion_id,
-            "Profesional_id": Profesional_id,
-            "item": item.strip(),
-            "cantidad": cantidad,
-            "estado": estado,
-            "observaciones": observaciones,
-            "creado_por": creado_por,
-            "creado_en": _now(),
-            "actualizado_en": _now(),
-        }
-        cols = ",".join(row.keys()); ph = ",".join(["?"] * len(row))
-        with self.db:
-            self.db.execute(f"INSERT INTO papeleria ({cols}) VALUES ({ph})", tuple(row.values()))
-
-    def list_papeleria(self, filtros: Dict[str, Any]) -> pd.DataFrame:
-        q = (
-            "SELECT pa.*, p.nombre AS programa, c.nombre AS convenio, "
-            "i.nombre AS institucion, f.nombre AS Profesional "
-            "FROM papeleria pa "
-            "LEFT JOIN programas p ON p.id=pa.programa_id "
-            "LEFT JOIN convenios c ON c.id=pa.convenio_id "
-            "LEFT JOIN instituciones i ON i.id=pa.institucion_id "
-            "LEFT JOIN Profesionales f ON f.id=pa.Profesional_id "
-            "WHERE 1=1 "
-        )
-        params: List[Any] = []
-        if filtros.get("fecha_desde"):
-            q += " AND date(pa.fecha)>=date(?)"; params.append(filtros["fecha_desde"].strftime("%Y-%m-%d"))
-        if filtros.get("fecha_hasta"):
-            q += " AND date(pa.fecha)<=date(?)"; params.append(filtros["fecha_hasta"].strftime("%Y-%m-%d"))
-        for k in ["programa_id", "convenio_id", "Profesional_id"]:
-            if filtros.get(k):
-                q += f" AND pa.{k}=?"; params.append(filtros[k])
-        q += " ORDER BY pa.fecha DESC, pa.id DESC"
-        return pd.read_sql_query(q, self.db, params=params)
-
-    def get_papeleria_by_id(self, pid: int) -> Optional[Dict[str, Any]]:
-        r = self.db.execute("SELECT * FROM papeleria WHERE id=?", (pid,)).fetchone()
-        return dict(r) if r else None
-
-    def update_papeleria(self, pid: int, updates: Dict[str, Any]) -> None:
-        updates = dict(updates); updates["actualizado_en"] = _now()
-        sets = ",".join([f"{k}=?" for k in updates.keys()])
-        with self.db:
-            self.db.execute(f"UPDATE papeleria SET {sets} WHERE id=?", (*updates.values(), pid))
-
-    def delete_papeleria(self, pid: int) -> None:
-        with self.db:
-            self.db.execute("DELETE FROM papeleria WHERE id=?", (pid,))
-
-DATA = DataAccess(SQLITE_CONN)
-
-# ---------------- ESTADO / LOGIN ----------------
-def ensure_session_state():
-    if "filters" not in st.session_state: st.session_state.filters = {}
-    if "user" not in st.session_state: st.session_state.user = None
-    if "role" not in st.session_state: st.session_state.role = None
-
-ensure_session_state()
-
-def sidebar_filters():
-    st.sidebar.header("Filtros")
-    hoy = date.today()
-    fdesde = st.sidebar.date_input("Desde", value=st.session_state.filters.get("fecha_desde", hoy.replace(day=1)), key="flt_desde")
-    fhasta = st.sidebar.date_input("Hasta", value=st.session_state.filters.get("fecha_hasta", hoy), key="flt_hasta")
-
-    progs = DATA.list_programas()
-    prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
-    psel = st.sidebar.selectbox("Programa", options=["(Todos)"] + list(prog_map.keys()), key="flt_programa")
-    pid = prog_map.get(psel)
-
-    conv = DATA.list_convenios(pid) if pid else DATA.list_convenios()
-    conv_map = {r["nombre"]: int(r["id"]) for _, r in conv.iterrows()} if not conv.empty else {}
-    csel = st.sidebar.selectbox("Convenio", options=["(Todos)"] + list(conv_map.keys()), key="flt_convenio")
-    cid = conv_map.get(csel)
-
-    prof = DATA.list_Profesionales(pid, cid)
-    prof_map = {r["nombre"]: int(r["id"]) for _, r in prof.iterrows()} if not prof.empty else {}
-    fsel = st.sidebar.selectbox("Profesional", options=["(Todos)"] + list(prof_map.keys()), key="flt_profesional")
-    fid = prof_map.get(fsel)
-
-    act = st.sidebar.selectbox("Actividad / plantilla", options=["(Todas)"] + ACTIVIDADES_PLANTILLAS, key="flt_actividad")
-
-    st.session_state.filters = {
-        "fecha_desde": fdesde,
-        "fecha_hasta": fhasta,
-        "programa_id": pid,
-        "convenio_id": cid,
-        "Profesional_id": fid,
-        "actividad": (None if act == "(Todas)" else act),
-    }
-
-def render_login():
-    with st.sidebar:
-        if st.session_state.user:
-            st.success(f"Sesión: {st.session_state.user} ({st.session_state.role})")
-            if st.button("Cerrar sesión", key="login_logout", use_container_width=True):
-                st.session_state.user = None; st.session_state.role = None; st.rerun()
-        else:
-            st.markdown("### Iniciar sesión")
-            u = st.text_input("Usuario", key="login_user")
-            p = st.text_input("Contraseña", type="password", key="login_pass")
-            if st.button("Ingresar", key="login_btn", use_container_width=True):
-                user = USERS.get(u)
-                if user and p == user["password"]:
-                    st.session_state.user = u; st.session_state.role = user["role"]
-                    success_toast("Ingreso exitoso."); st.rerun()
+TIPO_CONTACTO = ["Presencial","Virtual","Telefónico","Domiciliario","Otro"]
+
+def ui_registrar_atenciones(user):
+    st.markdown("### Registrar atenciones")
+
+    with st.form(key=k("reg","form")):
+        c1, c2, c3 = st.columns(3)
+        programa = c1.text_input("Programa", key=k("reg","programa"))
+        convenio = c2.text_input("Convenio", key=k("reg","convenio"))
+        profesional = c3.text_input("Profesional", value=user["username"], key=k("reg","prof"))
+        c4, c5, c6 = st.columns(3)
+        institucion = c4.text_input("Institución", key=k("reg","inst"))
+        departamento = c5.text_input("Departamento", key=k("reg","dpto"))
+        municipio = c6.text_input("Municipio", key=k("reg","mpio"))
+        c7, c8 = st.columns(2)
+        localidad = c7.text_input("Localidad (Bogotá)", key=k("reg","loc"))
+        fecha = c8.date_input("Fecha", value=date.today(), key=k("reg","fecha"))
+        actividad = st.selectbox("Actividad/Plantilla", options=ACTIVIDADES, key=k("reg","act"))
+
+        st.divider()
+        st.markdown("**Paciente**")
+        cc1, cc2, cc3 = st.columns([1,1,1])
+        documento = cc1.text_input("Documento", key=k("reg","doc"))
+        if cc2.form_submit_button("Buscar", use_container_width=True):
+            if documento:
+                r = get_paciente(documento)
+                if r:
+                    # Autorrelleno a session_state
+                    st.session_state[k("reg","nombre")] = r["nombre"] or ""
+                    st.session_state[k("reg","sexo")] = r["sexo"] or ""
+                    st.session_state[k("reg","fec")] = r["fecha_nacimiento"] or ""
+                    st.session_state[k("reg","tel")] = r["telefono"] or ""
+                    st.session_state[k("reg","mail")] = r["email"] or ""
+                    st.session_state[k("reg","dir")] = r["direccion"] or ""
+                    st.session_state[k("reg","locpac")] = r["localidad"] or ""
+                    st.session_state[k("reg","mpiopac")] = r["municipio"] or ""
+                    st.session_state[k("reg","dptopac")] = r["departamento"] or ""
+                    st.session_state[k("reg","zona")] = r["zona"] or ""
+                    st.session_state[k("reg","prio")] = int(r["priorizado"] or 0)
+                    st.success("Paciente encontrado y autocompletado.")
                 else:
-                    error_toast("Usuario o contraseña incorrectos.")
-
-# ---------------- CARGA MASIVA DE ATENCIONES (helper) ----------------
-def plantilla_atenciones_df() -> pd.DataFrame:
-    cols = [
-        "fecha", "programa", "convenio", "institucion", "departamento", "municipio", "localidad",
-        "profesional", "documento", "nombre", "actividad",
-        "atendido",
-        "registrado_panacea",        # atención registrada
-        "paciente_creado_panacea",   # ⬅️ nuevo campo
-        "tipo_contacto", "duracion_minutos", "observaciones",
-        "sexo", "fecha_nacimiento", "telefono", "email", "direccion", "zona"
-    ]
-    return pd.DataFrame(columns=cols)
-
-def parse_fecha(value) -> str:
-    if pd.isna(value) or value is None: return date.today().strftime("%Y-%m-%d")
-    if isinstance(value, (datetime, date)): return value.strftime("%Y-%m-%d")
-    s = str(value).strip().replace("/", "-")
-    try:
-        return pd.to_datetime(s, dayfirst=True, errors="coerce").strftime("%Y-%m-%d")
-    except Exception:
-        return date.today().strftime("%Y-%m-%d")
-
-def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, List[str]]:
-    """
-    Columnas mínimas: fecha, programa, convenio, institucion, profesional, documento, nombre, actividad
-    Opcionales: departamento, municipio, localidad, atendido, registrado_panacea, paciente_creado_panacea,
-                tipo_contacto, duracion_minutos, observaciones, sexo, fecha_nacimiento, telefono, email,
-                direccion, zona
-    """
-    df = df.copy()
-    req = {"fecha", "programa", "convenio", "institucion", "profesional", "documento", "nombre", "actividad"}
-    missing = req - set(df.columns)
-    if missing:
-        raise ValueError(f"Faltan columnas obligatorias: {sorted(list(missing))}")
-
-    ok = 0; errores: List[str] = []
-    for idx, r in df.iterrows():
-        try:
-            # Fecha
-            f_raw = r.get("fecha"); fecha = parse_fecha(f_raw)
-
-            # Programa y convenio (auto-upsert)
-            p_name = str(r.get("programa") or "").strip()
-            c_name = str(r.get("convenio") or "").strip()
-            if not p_name or not c_name: raise ValueError("Programa y convenio son obligatorios")
-            pid = DATA.programa_id_by_name(p_name) or DATA.upsert_programa(p_name)
-            cid = DATA.convenio_id_by_name(c_name, pid) or DATA.upsert_convenio(c_name, pid)
-
-            # Institución (auto-upsert con geo si viene)
-            i_name = str(r.get("institucion") or "").strip()
-            dep = str(r.get("departamento") or "").strip() or None
-            mun = str(r.get("municipio") or "").strip() or None
-            loc = str(r.get("localidad") or "").strip() or None
-            if not i_name: raise ValueError("Institución es obligatoria")
-            iid = DATA.institucion_id_by_name_geo(i_name, mun, dep) or DATA.upsert_institucion(i_name, loc, mun, dep)
-            inst_row = SQLITE_CONN.execute("SELECT * FROM instituciones WHERE id=?", (iid,)).fetchone()
-            localidad_val = inst_row["localidad"]; municipio_val = inst_row["municipio"]; departamento_val = inst_row["departamento"]
-
-            # Profesional (auto-upsert)
-            f_name = str(r.get("profesional") or "").strip()
-            if not f_name: raise ValueError("Profesional es obligatorio")
-            fid = DATA.Profesional_id_by_name(f_name, pid, cid) or DATA.upsert_Profesional(f_name, None, None, pid, cid, None)
-
-            # Paciente (upsert)
-            doc = str(r.get("documento") or "").strip()
-            nom = str(r.get("nombre") or "").strip()
-            if not doc or not nom: raise ValueError("Documento y nombre del paciente son obligatorios")
-            pac_id = DATA.upsert_paciente(
-                numero_documento=doc,
-                nombre=nom,
-                fecha_nacimiento=str(r.get("fecha_nacimiento")) if pd.notna(r.get("fecha_nacimiento")) else None,
-                sexo=str(r.get("sexo")).strip() if pd.notna(r.get("sexo")) else None,
-                telefono=str(r.get("telefono")).strip() if pd.notna(r.get("telefono")) else None,
-                email=str(r.get("email")).strip() if pd.notna(r.get("email")) else None,
-                direccion=str(r.get("direccion")).strip() if pd.notna(r.get("direccion")) else None,
-                localidad=None, municipio=None, departamento=None,
-                zona=str(r.get("zona")).strip() if pd.notna(r.get("zona")) else None,
-            )
-
-            # Campos de la atención
-            actividad = str(r.get("actividad") or "").strip() or ACTIVIDADES_PLANTILLAS[0]
-            atendido = bool(str2bool(r.get("atendido")))
-
-            # atención registrada en Panacea (NO el paciente)
-            reg_field_att = next((c for c in ["registrado_panacea","atencion_en_panacea","atencion_registrada_panacea","en_panacea"] if c in df.columns), None)
-            registrado_panacea = bool(str2bool(r.get(reg_field_att))) if reg_field_att else False
-
-            # paciente creado en Panacea (NUEVO)
-            reg_field_pac = next((c for c in ["paciente_creado_panacea","paciente_en_panacea","creado_panacea","paciente_creado"] if c in df.columns), None)
-            paciente_creado_panacea = bool(str2bool(r.get(reg_field_pac))) if reg_field_pac else False
-
-            tipo_contacto = str(r.get("tipo_contacto")).strip() if pd.notna(r.get("tipo_contacto")) else None
-            if tipo_contacto in ("", "(no especifica)", "no especifica"): tipo_contacto = None
-            duracion = safe_int(r.get("duracion_minutos"))
-
-            # Insert
-            DATA.insert_registro(
-                fecha=fecha,
-                programa_id=pid, convenio_id=cid, institucion_id=iid, Profesional_id=fid,
-                paciente_id=pac_id,
-                localidad=localidad_val, municipio=municipio_val, departamento=departamento_val,
-                numero_paciente=doc, nombre_paciente=nom,
-                actividad=actividad, atendido=atendido,
-                registrado_panacea=registrado_panacea,
-                paciente_creado_panacea=paciente_creado_panacea,  # ⬅️ nuevo
-                duracion_minutos=duracion, tipo_contacto=tipo_contacto,
-                observaciones=(str(r.get("observaciones")).strip() if pd.notna(r.get("observaciones")) else None),
-                creado_por=auth_user,
-            )
-            ok += 1
-        except Exception as e:
-            errores.append(f"Fila {idx+2}: {e}")
-    return ok, errores
-
-# ---------------- UI: REGISTRAR ATENCION ----------------
-def ui_cargar_datos(auth_user: Optional[str]):
-    st.subheader("Registrar atención / paciente")
-
-    # Prefijo de keys de esta pantalla
-    def K(x: str) -> str:
-        return f"reg_{x}"
-
-    # Estado para autocompletado
-    defaults = {
-        K("pac_nombre"): "", K("pac_fecha_nac"): "", K("pac_telefono"): "", K("pac_email"): "",
-        K("pac_direccion"): "", K("pac_localidad"): "", K("pac_municipio"): "", K("pac_departamento"): "",
-        K("pac_sexo"): "(No especifica)", K("pac_zona"): "(No especifica)", K("pac_id_actual"): None, K("pac_doc"): "",
-        K("pac_creado_panacea"): False,   # ⬅️ nuevo default
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state: st.session_state[k] = v
-
-    # Selección programa/convenio/profesional
-    c1, c2 = st.columns([1.4, 1.4])
-    progs = DATA.list_programas()
-    prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
-    psel = c1.selectbox("Programa", options=list(prog_map.keys()) if prog_map else [], key=K("form_programa"))
-    pid = prog_map.get(psel)
-
-    conv = DATA.list_convenios(pid) if pid else pd.DataFrame()
-    conv_map = {r["nombre"]: int(r["id"]) for _, r in conv.iterrows()} if not conv.empty else {}
-    csel = c1.selectbox("Convenio", options=list(conv_map.keys()) if conv_map else [], key=K("form_convenio"))
-    cid = conv_map.get(csel)
-
-    prof = DATA.list_Profesionales(pid, cid)
-    prof_map = {r["nombre"]: int(r["id"]) for _, r in prof.iterrows()} if not prof.empty else {}
-    fsel = c2.selectbox("Profesional", options=list(prof_map.keys()) if prof_map else [], key=K("form_profesional"))
-    fid = prof_map.get(fsel)
-
-    # Ubicación e institución
-    instituciones = DATA.list_instituciones()
-    institucion_id = None
-    localidad_val = municipio_val = departamento_val = None
-
-    st.markdown("#### Ubicación e institución")
-    if instituciones.empty:
-        st.info("No hay instituciones configuradas. Crea instituciones en Configuración.")
-    else:
-        g1, g2, g3, g4 = st.columns([1, 1, 1, 2])
-        deps = sorted({str(x) for x in instituciones["departamento"].dropna().unique()})
-        dep_sel = g1.selectbox("Departamento", options=deps, key=K("departamento_sel")) if deps else None
-
-        inst_dep = instituciones if not dep_sel else instituciones[instituciones["departamento"] == dep_sel]
-        muns = sorted({str(x) for x in inst_dep["municipio"].dropna().unique()})
-        mun_sel = g2.selectbox("Municipio", options=["(Todos)"] + muns, key=K("municipio_sel")) if muns else "(Todos)"
-
-        inst_mun = inst_dep if mun_sel == "(Todos)" else inst_dep[inst_dep["municipio"] == mun_sel]
-        locs = sorted({str(x) for x in inst_mun["localidad"].dropna().unique()})
-        loc_label = "Localidad (Bogotá)" if dep_sel and "BOGOTA" in dep_sel.upper() else "Localidad"
-        loc_sel = g3.selectbox(loc_label, options=["(Todas)"] + locs, key=K("localidad_sel")) if locs else "(Todas)"
-
-        inst_geo = inst_mun if loc_sel == "(Todas)" else inst_mun[inst_mun["localidad"] == loc_sel]
-        inst_map = {r["nombre"]: int(r["id"]) for _, r in inst_geo.iterrows()}
-        inst_sel = g4.selectbox("Institución", options=list(inst_map.keys()) if inst_map else [], key=K("institucion_sel"))
-        institucion_id = inst_map.get(inst_sel)
-        if institucion_id:
-            row = instituciones[instituciones["id"] == institucion_id].iloc[0]
-            localidad_val = row.get("localidad"); municipio_val = row.get("municipio"); departamento_val = row.get("departamento")
-
-    # Fecha y actividad
-    c3, c4 = st.columns([1, 1])
-    fecha = c3.date_input("Fecha de la atención", value=date.today(), key=K("fecha"))
-    actividad = c4.selectbox("Actividad / plantilla", ACTIVIDADES_PLANTILLAS, key=K("actividad"))
-
-    # ---------------- AUTORELLENO PACIENTE ----------------
-    st.markdown("#### Datos del paciente")
-    p1, p2 = st.columns([1, 1])
-    p1.text_input("Documento del paciente (cédula)", key=K("pac_doc"))
-    if p2.button("Buscar paciente por documento", key=K("btn_buscar_paciente")):
-        try:
-            doc_trim = (st.session_state[K("pac_doc")] or "").strip()
-            pac = DATA.get_paciente_por_documento(doc_trim)
-            if pac:
-                st.session_state[K("pac_id_actual")] = pac.get("id")
-                st.session_state[K("pac_nombre")] = pac.get("nombre", "") or ""
-                st.session_state[K("pac_sexo")] = pac.get("sexo") if pac.get("sexo") in ["F", "M", "Otro"] else "(No especifica)"
-                st.session_state[K("pac_fecha_nac")] = pac.get("fecha_nacimiento", "") or ""
-                st.session_state[K("pac_telefono")] = pac.get("telefono", "") or ""
-                st.session_state[K("pac_email")] = pac.get("email", "") or ""
-                st.session_state[K("pac_direccion")] = pac.get("direccion", "") or ""
-                st.session_state[K("pac_localidad")] = pac.get("localidad", "") or ""
-                st.session_state[K("pac_municipio")] = pac.get("municipio", "") or ""
-                st.session_state[K("pac_departamento")] = pac.get("departamento", "") or ""
-                st.session_state[K("pac_zona")] = pac.get("zona") if pac.get("zona") in ["Urbana", "Rural"] else "(No especifica)"
-                success_toast("Paciente encontrado. Campos autocompletados."); st.rerun()
+                    st.info("Paciente no existe. Completa los datos para crearlo al guardar.")
             else:
-                st.session_state[K("pac_id_actual")] = None; warn_toast("No se encontró paciente. Diligencia y se creará.")
-        except Exception as e:
-            error_toast(f"Error buscando paciente: {e}")
-
-    p3, p4 = st.columns([1.5, 1])
-    p3.text_input("Nombre completo del paciente", key=K("pac_nombre"))
-    sexo_opts = ["(No especifica)", "F", "M", "Otro"]
-    st.session_state.setdefault(K("pac_sexo"), "(No especifica)")
-    p4.selectbox("Sexo (opcional)", options=sexo_opts, key=K("pac_sexo"))
-
-    p5, p6 = st.columns([1, 1])
-    p5.text_input("Fecha de nacimiento (AAAA-MM-DD, opcional)", key=K("pac_fecha_nac"))
-    p6.text_input("Teléfono (opcional)", key=K("pac_telefono"))
-
-    p7, p8 = st.columns([1, 1])
-    p7.text_input("Email (opcional)", key=K("pac_email"))
-    p8.text_input("Dirección (opcional)", key=K("pac_direccion"))
-
-    p9, p10, p11 = st.columns([1, 1, 1])
-    p9.text_input("Localidad paciente (opcional)", key=K("pac_localidad"))
-    p10.text_input("Municipio paciente (opcional)", key=K("pac_municipio"))
-    p11.text_input("Departamento paciente (opcional)", key=K("pac_departamento"))
-
-    zcol, zcol2 = st.columns([1, 1])
-    zona_opts = ["(No especifica)", "Urbana", "Rural"]
-    st.session_state.setdefault(K("pac_zona"), "(No especifica)")
-    zcol.selectbox("Zona (Rural/Urbana)", options=zona_opts, key=K("pac_zona"))
-
-    # ----- NUEVOS CHECKS -----
-    zcol2.checkbox("Paciente creado en Panacea", key=K("pac_creado_panacea"))  # ⬅️ paciente
-    c9, c10 = st.columns([1, 1])
-    c9.radio("¿Atendido?", ["No", "Sí"], index=1, horizontal=True, key=K("atendido"))
-    c10.checkbox("Atención registrada en Panacea", key=K("reg_panacea"))       # ⬅️ atención
-
-    c11, c12 = st.columns([1, 1])
-    c11.selectbox("Tipo de contacto", options=["(No especifica)"] + TIPOS_CONTACTO, key=K("tipo_contacto"))
-    c12.number_input("Duración de la atención (minutos, opcional)", min_value=0, max_value=480, step=5, key=K("duracion_minutos"))
-
-    observaciones = st.text_area("Observaciones", key=K("observaciones"))
-
-    # Guardar atención (manual)
-    clicked = st.button("Guardar atención", type="primary", use_container_width=True, key=K("btn_guardar_atencion"))
-    if clicked:
-        faltantes = []
-        if not pid: faltantes.append("Programa")
-        if not cid: faltantes.append("Convenio")
-        if not fid: faltantes.append("Profesional")
-        if not institucion_id: faltantes.append("Institución")
-        if not (st.session_state.get(K("pac_doc")) or "").strip(): faltantes.append("Documento del paciente")
-        if not (st.session_state.get(K("pac_nombre")) or "").strip(): faltantes.append("Nombre del paciente")
-
-        if faltantes:
-            error_toast("Faltan datos obligatorios: " + ", ".join(faltantes))
-        else:
-            try:
-                dur = st.session_state.get(K("duracion_minutos")) or 0
-                dur_val = int(dur) if dur and dur > 0 else None
-                tc = st.session_state.get(K("tipo_contacto"))
-                tipo_contacto_val = None if tc == "(No especifica)" else tc
-                sexo_val = None if st.session_state[K("pac_sexo")] == "(No especifica)" else st.session_state[K("pac_sexo")]
-                zona_val = None if st.session_state[K("pac_zona")] == "(No especifica)" else st.session_state[K("pac_zona")]
-
-                pac_id = DATA.upsert_paciente(
-                    numero_documento=(st.session_state[K("pac_doc")] or "").strip(),
-                    nombre=(st.session_state[K("pac_nombre")] or "").strip(),
-                    fecha_nacimiento=(st.session_state[K("pac_fecha_nac")] or None),
-                    sexo=sexo_val,
-                    telefono=(st.session_state[K("pac_telefono")] or None),
-                    email=(st.session_state[K("pac_email")] or None),
-                    direccion=(st.session_state[K("pac_direccion")] or None),
-                    localidad=(st.session_state[K("pac_localidad")] or None),
-                    municipio=(st.session_state[K("pac_municipio")] or None),
-                    departamento=(st.session_state[K("pac_departamento")] or None),
-                    zona=zona_val,
-                )
-
-                DATA.insert_registro(
-                    fecha=st.session_state[K("fecha")],
-                    programa_id=int(pid), convenio_id=int(cid), institucion_id=int(institucion_id),
-                    Profesional_id=int(fid), paciente_id=pac_id,
-                    localidad=localidad_val, municipio=municipio_val, departamento=departamento_val,
-                    numero_paciente=(st.session_state[K("pac_doc")] or "").strip(),
-                    nombre_paciente=(st.session_state[K("pac_nombre")] or "").strip(),
-                    actividad=st.session_state[K("actividad")],
-                    atendido=True if st.session_state[K("atendido")] == "Sí" else False,
-                    registrado_panacea=bool(st.session_state[K("reg_panacea")]),          # atención
-                    paciente_creado_panacea=bool(st.session_state[K("pac_creado_panacea")]),  # paciente
-                    duracion_minutos=dur_val, tipo_contacto=tipo_contacto_val,
-                    observaciones=observaciones, creado_por=auth_user,
-                )
-                success_toast("Atención registrada."); st.rerun()
-            except Exception as e:
-                error_toast(f"Error al guardar: {e}")
-
-    st.markdown("---")
-    with st.expander("📥 Carga masiva de atenciones (Excel/CSV)", expanded=False):
-        def KM(x: str) -> str: return f"regm_{x}"
-
-        tpl = plantilla_atenciones_df()
-
-        def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
-            out = io.BytesIO()
-            with pd.ExcelWriter(out, engine="openpyxl") as w:
-                for name, df in sheets.items():
-                    dd = df.copy(); dd.columns = [str(c)[:40] for c in dd.columns]
-                    dd.to_excel(w, sheet_name=name[:31], index=False)
-            return out.getvalue()
-
-        tpl_xlsx = to_excel_bytes({"Atenciones": tpl})
-        st.download_button("Descargar plantilla (.xlsx)", data=tpl_xlsx, file_name="plantilla_atenciones.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           use_container_width=True, key=KM("dl_xlsx"))
-        st.download_button("Descargar plantilla (.csv)", data=tpl.to_csv(index=False).encode("utf-8"),
-                           file_name="plantilla_atenciones.csv", mime="text/csv",
-                           use_container_width=True, key=KM("dl_csv"))
-
-        st.caption("**Obligatorias**: fecha, programa, convenio, institucion, profesional, documento, nombre, actividad. "
-                   "**Opcionales**: departamento, municipio, localidad, atendido, registrado_panacea (atención), "
-                   "paciente_creado_panacea (paciente), tipo_contacto, duracion_minutos, observaciones, sexo, fecha_nacimiento, "
-                   "telefono, email, direccion, zona.")
-
-        up = st.file_uploader("Archivo de atenciones", type=["xlsx", "xls", "csv"], key=KM("file"))
-        if up is not None and st.button("Procesar atenciones", type="primary", use_container_width=True, key=KM("btn")):
-            try:
-                df_up = read_table_upload(up)
-                ok, errores = procesar_atenciones_masivo(df_up, auth_user or "desconocido")
-                if ok: success_toast(f"Atenciones procesadas: {ok}")
-                if errores:
-                    st.error("Se encontraron errores:")
-                    for e in errores[:500]:
-                        st.write(f"- {e}")
-                if ok: st.rerun()
-            except Exception as e:
-                st.error(f"Error procesando archivo: {e}")
-
-# ---------------- UI: LISTADO ----------------
-def ui_registros():
-    st.subheader("Listado de atenciones")
-    df = DATA.list_registros(st.session_state.filters)
-    if df.empty:
-        st.info("Sin registros.")
-        return
-
-    if "tasa_atencion" in df.columns:
-        df["tasa_atencion_%"] = (df["tasa_atencion"] * 100).round(1)
-
-    show = [
-        "id","fecha","programa","convenio","institucion","Profesional","actividad",
-        "numero_paciente","nombre_paciente","tipo_contacto","duracion_minutos",
-        "atendido",
-        "paciente_creado_panacea",   # ⬅️ nuevo visible
-        "registrado_panacea",
-        "pacientes_programados","pacientes_atendidos",
-        "no_asistieron","tasa_atencion_%","observaciones","creado_por","creado_en","actualizado_en",
-    ]
-    st.dataframe(df[[c for c in show if c in df.columns]], use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    c1, c2, _ = st.columns([1, 1, 3])
-    rid = c1.number_input("ID de atención", min_value=1, step=1, key="lst_reg_id_sel")
-    if c2.button("Eliminar atención", use_container_width=True, key="lst_btn_eliminar_reg"):
-        try:
-            DATA.delete_registro(int(rid)); success_toast("Eliminado."); st.rerun()
-        except Exception as e:
-            error_toast(f"No se pudo eliminar: {e}")
-
-# ---------------- UI: DASHBOARD ----------------
-def ui_dashboard():
-    st.subheader("Dashboard de gestión")
-    df = DATA.list_registros(st.session_state.filters)
-    if df.empty:
-        st.info("Sin datos para graficar.")
-        return
-
-    df["fecha"] = pd.to_datetime(df["fecha"])
-    total_prog = int(df["pacientes_programados"].sum())
-    total_att = int(df["pacientes_atendidos"].sum())
-    total_no = int(df["no_asistieron"].sum())
-    tasa = (total_att / total_prog * 100) if total_prog else 0.0
-    total_min = int(df.get("duracion_minutos", pd.Series()).fillna(0).sum()) if "duracion_minutos" in df.columns else 0
-    n_con = int(df.get("duracion_minutos", pd.Series()).notna().sum()) if "duracion_minutos" in df.columns else 0
-    prom = (total_min / n_con) if n_con else 0.0
-    horas = total_min / 60 if total_min > 0 else 0.0
-    prod_ph = (total_att / horas) if horas > 0 else 0.0
-    total_pan = int(df.get("registrado_panacea", pd.Series()).fillna(0).sum()) if "registrado_panacea" in df.columns else 0
-    total_pac_creados = int(df.get("paciente_creado_panacea", pd.Series()).fillna(0).sum()) if "paciente_creado_panacea" in df.columns else 0
-    brecha = total_att - total_pan
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Programados", f"{total_prog:,}".replace(",", "."))
-    k2.metric("Atendidos", f"{total_att:,}".replace(",", "."))
-    k3.metric("No asistieron", f"{total_no:,}".replace(",", "."))
-    k4.metric("Tasa atención", f"{tasa:.1f}%")
-
-    k5, k6, k7, k8 = st.columns(4)
-    k5.metric("Minutos", f"{total_min:,}".replace(",", "."))
-    k6.metric("Duración prom (min)", f"{prom:.1f}")
-    k7.metric("Atenciones/hora", f"{prod_ph:.2f}")
-    k8.metric("Atención en Panacea / brecha", f"{total_pan} / {brecha}")
-
-    k9, _ = st.columns([1, 3])
-    k9.metric("Pacientes creados en Panacea (en registros)", f"{total_pac_creados:,}".replace(",", "."))
-
-    tdf = (
-        df.groupby(pd.Grouper(key="fecha", freq="W"))[["pacientes_programados", "pacientes_atendidos"]]
-        .sum().reset_index()
-    )
-    st.plotly_chart(
-        px.line(tdf, x="fecha", y=["pacientes_programados", "pacientes_atendidos"], markers=True, title="Tendencia semanal"),
-        use_container_width=True,
-    )
-
-    rank = (
-        df.groupby("Profesional", dropna=True)["pacientes_atendidos"]
-        .sum().sort_values(ascending=False).head(15).reset_index()
-    )
-    fig2 = px.bar(rank, x="Profesional", y="pacientes_atendidos", title="Top profesionales")
-    fig2.update_layout(xaxis_tickangle=-40)
-    st.plotly_chart(fig2, use_container_width=True)
-
-    if "registrado_panacea" in df.columns:
-        pan = (
-            df.groupby("Profesional", dropna=True)
-            .agg(pacientes_atendidos=("pacientes_atendidos", "sum"), cargadas_panacea=("registrado_panacea", "sum"))
-            .reset_index()
-        )
-        pan["brecha"] = pan["pacientes_atendidos"] - pan["cargadas_panacea"]
-        fig2b = px.bar(
-            pan.sort_values("brecha", ascending=False).head(15),
-            x="Profesional", y=["pacientes_atendidos", "cargadas_panacea"],
-            barmode="group", title="Atenciones vs Panacea por profesional",
-        )
-        fig2b.update_layout(xaxis_tickangle=-40)
-        st.plotly_chart(fig2b, use_container_width=True)
-
-    act_sum = df.groupby("actividad")[["pacientes_programados", "pacientes_atendidos"]].sum().reset_index()
-    st.plotly_chart(
-        px.bar(act_sum, x="actividad", y=["pacientes_programados", "pacientes_atendidos"], barmode="group", title="Por actividad"),
-        use_container_width=True,
-    )
-
-# ---------------- UI: REPORTES ----------------
-def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as w:
-        for name, df in sheets.items():
-            dd = df.copy(); dd.columns = [str(c)[:40] for c in dd.columns]
-            dd.to_excel(w, sheet_name=name[:31], index=False)
-    return out.getvalue()
-
-def ui_reportes():
-    st.subheader("Reportes y descargas")
-    df = DATA.list_registros(st.session_state.filters)
-    if df.empty:
-         st.info("Sin registros para descargar."); return
-
-    agg_prof = (
-        df.groupby("Profesional", dropna=True)
-        .agg(pacientes_programados=("pacientes_programados", "sum"),
-             pacientes_atendidos=("pacientes_atendidos", "sum"),
-             cargadas_panacea=("registrado_panacea", "sum"),
-             pac_creados_panacea=("paciente_creado_panacea", "sum"),
-             minutos=("duracion_minutos", "sum"))
-        .reset_index()
-    )
-    agg_prof["tasa_atencion"] = np.where(
-        agg_prof["pacientes_programados"] > 0,
-        agg_prof["pacientes_atendidos"] / agg_prof["pacientes_programados"], np.nan
-    )
-    agg_prof["brecha_panacea"] = agg_prof["pacientes_atendidos"] - agg_prof["cargadas_panacea"]
-
-    por_inst = df.groupby("institucion", dropna=True)[["pacientes_programados", "pacientes_atendidos"]].sum().reset_index()
-    por_geo = (
-        df.groupby(["departamento", "municipio"], dropna=True)[["pacientes_programados", "pacientes_atendidos"]]
-        .sum().reset_index()
-    )
-    por_act = df.groupby("actividad")[["pacientes_programados", "pacientes_atendidos"]].sum().reset_index()
-
-    xls = to_excel_bytes({
-        "Detalle": df,
-        "Por_profesional": agg_prof,
-        "Por_institucion": por_inst,
-        "Por_geo": por_geo,
-        "Por_actividad": por_act
-    })
-    st.download_button(
-        "Descargar Excel (.xlsx)", data=xls,
-        file_name=f"productividad_profesionales_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True, key="rep_btn_descargar_xlsx",
-    )
-    st.download_button(
-        "Descargar detalle (.csv)", data=df.to_csv(index=False).encode("utf-8"),
-        file_name=f"productividad_profesionales_detalle_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-        mime="text/csv", use_container_width=True, key="rep_btn_descargar_csv",
-    )
-
-# ---------------- UI: VIATICOS ----------------
-def ui_viaticos(auth_user: Optional[str]):
-    st.subheader("Registro de viáticos")
-    c1, c2 = st.columns([1, 1])
-    fecha = c1.date_input("Fecha", value=date.today(), key="via_fecha")
-
-    progs = DATA.list_programas()
-    prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
-    psel = c2.selectbox("Programa (opcional)", options=["(Sin programa)"] + list(prog_map.keys()), key="via_programa")
-    pid = prog_map.get(psel)
-
-    conv = DATA.list_convenios(pid) if pid else DATA.list_convenios()
-    conv_map = {r["nombre"]: int(r["id"]) for _, r in conv.iterrows()} if not conv.empty else {}
-    csel = c1.selectbox("Convenio (opcional)", options=["(Sin convenio)"] + list(conv_map.keys()), key="via_convenio")
-    cid = conv_map.get(csel)
-
-    prof = DATA.list_Profesionales(pid, cid)
-    prof_map = {r["nombre"]: int(r["id"]) for _, r in prof.iterrows()} if not prof.empty else {}
-    fsel = c2.selectbox("Profesional (opcional)", options=["(Sin profesional)"] + list(prof_map.keys()), key="via_profesional")
-    fid = prof_map.get(fsel)
-
-    inst = DATA.list_instituciones()
-    inst_map = {r["nombre"]: int(r["id"]) for _, r in inst.iterrows()} if not inst.empty else {}
-    isel = st.selectbox("Institución destino (opcional)", options=["(Sin institución)"] + list(inst_map.keys()), key="via_institucion")
-    iid = inst_map.get(isel)
-
-    c5, c6 = st.columns([1, 1])
-    req = c5.radio("¿Requiere viáticos?", ["No", "Sí"], index=1, horizontal=True, key="via_req")
-    origen = c6.text_input("Sitio de origen", key="via_origen")
-    destino = st.text_input("Sitio de destino", key="via_destino")
-    valor = st.number_input("Valor de viáticos", min_value=0.0, step=1000.0, key="via_valor")
-    obs = st.text_area("Observaciones (opcional)", key="via_obs")
-
-    if st.button("Guardar viático", type="primary", use_container_width=True, key="via_guardar"):
-        try:
-            DATA.insert_viatico(
-                fecha=fecha, programa_id=pid, convenio_id=cid, institucion_id=iid, Profesional_id=fid,
-                requiere_viatico=(req == "Sí"), origen=origen, destino=destino, valor=valor if valor > 0 else None,
-                observaciones=obs, creado_por=auth_user,
-            ); success_toast("Viático registrado."); st.rerun()
-        except Exception as e:
-            error_toast(f"No se pudo guardar: {e}")
-
-    st.markdown("### Listado de viáticos")
-    df = DATA.list_viaticos(st.session_state.filters)
-    if df.empty:
-        st.info("Sin viáticos.")
-    else:
-        df["requiere_viatico"] = df["requiere_viatico"].map({1: "Sí", 0: "No"})
-        show = ["id","fecha","programa","convenio","institucion","Profesional","requiere_viatico","origen","destino","valor","observaciones","creado_por","creado_en"]
-        st.dataframe(df[[c for c in show if c in df.columns]], use_container_width=True, hide_index=True)
-        st.metric("Total viáticos (filtro)", f"${df['valor'].fillna(0).sum():,.0f}".replace(",", "."))
-
-# ---------------- UI: PLANIFICADOR ----------------
-def ui_planificador(auth_user: Optional[str]):
-    st.subheader("Planificador (agenda)")
-
-    # CREATE
-    c1, c2 = st.columns([1, 1])
-    fecha = c1.date_input("Fecha", value=date.today(), key="ag_fecha")
-    hi = c1.time_input("Hora inicio", value=dtime(8, 0), key="ag_hora_ini")
-    hf = c2.time_input("Hora fin", value=dtime(9, 0), key="ag_hora_fin")
-    titulo = st.text_input("Título", key="ag_titulo")
-    descripcion = st.text_area("Descripción / notas", key="ag_descripcion")
-
-    c3, c4 = st.columns([1, 1])
-    progs = DATA.list_programas()
-    prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
-    psel = c3.selectbox("Programa (opcional)", options=["(Sin programa)"] + list(prog_map.keys()), key="ag_programa")
-    pid = prog_map.get(psel)
-
-    conv = DATA.list_convenios(pid) if pid else DATA.list_convenios()
-    conv_map = {r["nombre"]: int(r["id"]) for _, r in conv.iterrows()} if not conv.empty else {}
-    csel = c4.selectbox("Convenio (opcional)", options=["(Sin convenio)"] + list(conv_map.keys()), key="ag_convenio")
-    cid = conv_map.get(csel)
-
-    c5, c6 = st.columns([1, 1])
-    inst = DATA.list_instituciones()
-    inst_map = {r["nombre"]: int(r["id"]) for _, r in inst.iterrows()} if not inst.empty else {}
-    isel = c5.selectbox("Institución (opcional)", options=["(Sin institución)"] + list(inst_map.keys()), key="ag_institucion")
-    iid = inst_map.get(isel)
-
-    prof = DATA.list_Profesionales(pid, cid)
-    prof_map = {r["nombre"]: int(r["id"]) for _, r in prof.iterrows()} if not prof.empty else {}
-    fsel = c6.selectbox("Profesional (opcional)", options=["(Sin profesional)"] + list(prof_map.keys()), key="ag_Profesional")
-    fid = prof_map.get(fsel)
-
-    if st.button("Guardar evento", type="primary", use_container_width=True, key="ag_guardar"):
-        if not titulo.strip():
-            warn_toast("Título obligatorio.")
-        else:
-            try:
-                DATA.insert_agenda_event(fecha, hi, hf, titulo, descripcion, pid, cid, iid, fid, auth_user)
-                success_toast("Evento registrado."); st.rerun()
-            except Exception as e:
-                error_toast(f"No se pudo guardar: {e}")
-
-    st.markdown("### Agenda (según filtros)")
-    df = DATA.list_agenda(st.session_state.filters)
-    if df.empty:
-        st.info("Sin eventos.")
-    else:
-        show = ["id","fecha","hora_inicio","hora_fin","titulo","descripcion","programa","convenio","institucion","Profesional","creado_por","creado_en"]
-        st.dataframe(df[[c for c in show if c in df.columns]], use_container_width=True, hide_index=True)
-
-    # EDIT / DELETE
-    st.markdown("---")
-    st.markdown("#### Editar / eliminar evento")
-    c7, c8, c9 = st.columns([1, 1, 1])
-    eid = c7.number_input("ID de evento", min_value=1, step=1, key="ag_edit_id")
-    cargar = c8.button("Cargar", key="ag_edit_cargar")
-    eliminar = c9.button("Eliminar", key="ag_edit_eliminar")
-
-    if eliminar:
-        try:
-            DATA.delete_agenda_event(int(eid)); success_toast("Evento eliminado."); st.rerun()
-        except Exception as e:
-            error_toast(f"No se pudo eliminar: {e}")
-
-    if cargar:
-        ev = DATA.get_agenda_by_id(int(eid))
-        if not ev:
-            warn_toast("No existe evento con ese ID.")
-        else:
-            e1, e2 = st.columns([1, 1])
-            new_fecha = e1.date_input("Fecha", value=pd.to_datetime(ev["fecha"]).date(), key="ag_edit_fecha")
-            new_hi = e1.time_input("Hora inicio", value=dtime.fromisoformat(ev["hora_inicio"]) if ev["hora_inicio"] else dtime(8, 0), key="ag_edit_hi")
-            new_hf = e2.time_input("Hora fin", value=dtime.fromisoformat(ev["hora_fin"]) if ev["hora_fin"] else dtime(9, 0), key="ag_edit_hf")
-            new_tit = st.text_input("Título", value=ev["titulo"], key="ag_edit_titulo")
-            new_desc = st.text_area("Descripción / notas", value=ev["descripcion"] or "", key="ag_edit_desc")
-
-            if st.button("Guardar cambios", type="primary", key="ag_edit_guardar"):
-                try:
-                    DATA.update_agenda_event(
-                        int(eid),
-                        {
-                            "fecha": new_fecha.strftime("%Y-%m-%d"),
-                            "hora_inicio": new_hi.strftime("%H:%M") if new_hi else None,
-                            "hora_fin": new_hf.strftime("%H:%M") if new_hf else None,
-                            "titulo": new_tit.strip(),
-                            "descripcion": new_desc.strip() or None,
-                        },
-                    ); success_toast("Evento actualizado."); st.rerun()
-                except Exception as e:
-                    error_toast(f"No se pudo actualizar: {e}")
-
-# ---------------- UI: PAPELERIA ----------------
-def ui_papeleria(auth_user: Optional[str]):
-    st.subheader("Solicitud de papelería")
-
-    c1, c2 = st.columns([1, 1])
-    fecha = c1.date_input("Fecha", value=date.today(), key="pp_fecha")
-    item = c1.text_input("Ítem solicitado (ej. Historias, Carpetas, Esferos, Hojas A4)", key="pp_item")
-    cantidad = c2.number_input("Cantidad", min_value=1, step=1, key="pp_cantidad")
-    estado = c2.selectbox("Estado", options=["Solicitado", "Aprobado", "Entregado"], index=0, key="pp_estado")
-    observ = st.text_area("Observaciones", key="pp_obs")
-
-    progs = DATA.list_programas()
-    prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
-    psel = st.selectbox("Programa (opcional)", options=["(Sin programa)"] + list(prog_map.keys()), key="pp_prog")
-    pid = prog_map.get(psel)
-
-    conv = DATA.list_convenios(pid) if pid else DATA.list_convenios()
-    conv_map = {r["nombre"]: int(r["id"]) for _, r in conv.iterrows()} if not conv.empty else {}
-    csel = st.selectbox("Convenio (opcional)", options=["(Sin convenio)"] + list(conv_map.keys()), key="pp_conv")
-    cid = conv_map.get(csel)
-
-    inst = DATA.list_instituciones()
-    inst_map = {r["nombre"]: int(r["id"]) for _, r in inst.iterrows()} if not inst.empty else {}
-    isel = st.selectbox("Institución (opcional)", options=["(Sin institución)"] + list(inst_map.keys()), key="pp_inst")
-    iid = inst_map.get(isel)
-
-    prof = DATA.list_Profesionales(pid, cid)
-    prof_map = {r["nombre"]: int(r["id"]) for _, r in prof.iterrows()} if not prof.empty else {}
-    fsel = st.selectbox("Profesional (opcional)", options=["(Sin profesional)"] + list(prof_map.keys()), key="pp_prof")
-    fid = prof_map.get(fsel)
-
-    if st.button("Guardar solicitud", type="primary", use_container_width=True, key="pp_guardar"):
-        if not item.strip():
-            warn_toast("Debes indicar el ítem solicitado.")
-        else:
-            try:
-                DATA.insert_papeleria(fecha, pid, cid, iid, fid, item, int(cantidad), estado, observ or None, auth_user)
-                success_toast("Solicitud registrada."); st.rerun()
-            except Exception as e:
-                error_toast(f"No se pudo guardar: {e}")
-
-    st.markdown("### Solicitudes registradas (según filtros)")
-    df = DATA.list_papeleria(st.session_state.filters)
-    if df.empty:
-        st.info("Sin solicitudes.")
-    else:
-        show = ["id","fecha","item","cantidad","estado","programa","convenio","institucion","Profesional","observaciones","creado_por","creado_en"]
-        st.dataframe(df[[c for c in show if c in df.columns]], use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.markdown("#### Editar / eliminar solicitud")
-    c7, c8, c9 = st.columns([1, 1, 1])
-    pid_in = c7.number_input("ID de solicitud", min_value=1, step=1, key="pp_edit_id")
-    cargar = c8.button("Cargar", key="pp_edit_cargar")
-    eliminar = c9.button("Eliminar", key="pp_edit_eliminar")
-
-    if eliminar:
-        try:
-            DATA.delete_papeleria(int(pid_in)); success_toast("Solicitud eliminada."); st.rerun()
-        except Exception as e:
-            error_toast(f"No se pudo eliminar: {e}")
-
-    if cargar:
-        rec = DATA.get_papeleria_by_id(int(pid_in))
-        if not rec:
-            warn_toast("No existe solicitud con ese ID.")
-        else:
-            e1, e2 = st.columns([1, 1])
-            new_fecha = e1.date_input("Fecha", value=pd.to_datetime(rec["fecha"]).date(), key="pp_edit_fecha")
-            new_item = e1.text_input("Ítem", value=rec["item"], key="pp_edit_item")
-            new_cant = e2.number_input("Cantidad", min_value=1, step=1, value=int(rec["cantidad"] or 1), key="pp_edit_cant")
-            new_estado = e2.selectbox("Estado", options=["Solicitado", "Aprobado", "Entregado"], index=["Solicitado","Aprobado","Entregado"].index(rec["estado"] or "Solicitado"), key="pp_edit_estado")
-            new_obs = st.text_area("Observaciones", value=rec["observaciones"] or "", key="pp_edit_obs")
-
-            if st.button("Guardar cambios", type="primary", key="pp_edit_guardar"):
-                try:
-                    DATA.update_papeleria(
-                        int(pid_in),
-                        {
-                            "fecha": new_fecha.strftime("%Y-%m-%d"),
-                            "item": new_item.strip(),
-                            "cantidad": int(new_cant),
-                            "estado": new_estado,
-                            "observaciones": new_obs.strip() or None,
-                        },
-                    ); success_toast("Solicitud actualizada."); st.rerun()
-                except Exception as e:
-                    error_toast(f"No se pudo actualizar: {e}")
-
-# ---------------- UI: CONFIGURACION ----------------
-def ui_configuracion():
-    st.subheader("Configuración de catálogos")
-    tabs = st.tabs(["Programas", "Convenios", "Instituciones", "Profesionales", "Pacientes"])
-
-    # Programas
-    with tabs[0]:
-        c1, c2 = st.columns([2, 1])
-        pnom = c1.text_input("Nombre del programa", key="cfg_prog_nombre")
-        if c2.button("Agregar programa", use_container_width=True, key="cfg_btn_add_programa"):
-            if not pnom.strip(): warn_toast("Escribe un nombre.")
+                st.warning("Digita un documento para buscar.")
+
+        nombre = st.text_input("Nombre", value=st.session_state.get(k("reg","nombre"), ""), key=k("reg","nombre_in"))
+        cpa1, cpa2, cpa3 = st.columns(3)
+        sexo = cpa1.selectbox("Sexo", ["","M","F","Otro"], index=0, key=k("reg","sexo_in"),
+                              placeholder="Selecciona…")
+        fecha_nacimiento = cpa2.text_input("Fecha nacimiento (YYYY-MM-DD)",
+                                           value=st.session_state.get(k("reg","fec"), ""), key=k("reg","fec_in"))
+        telefono = cpa3.text_input("Teléfono", value=st.session_state.get(k("reg","tel"), ""), key=k("reg","tel_in"))
+        cpa4, cpa5 = st.columns(2)
+        email = cpa4.text_input("Email", value=st.session_state.get(k("reg","mail"), ""), key=k("reg","mail_in"))
+        direccion = cpa5.text_input("Dirección", value=st.session_state.get(k("reg","dir"), ""), key=k("reg","dir_in"))
+        cpa6, cpa7, cpa8 = st.columns(3)
+        localidad_p = cpa6.text_input("Localidad", value=st.session_state.get(k("reg","locpac"), ""), key=k("reg","locp_in"))
+        municipio_p = cpa7.text_input("Municipio", value=st.session_state.get(k("reg","mpiopac"), ""), key=k("reg","mpiop_in"))
+        departamento_p = cpa8.text_input("Departamento", value=st.session_state.get(k("reg","dptopac"), ""), key=k("reg","dptop_in"))
+        zona = st.selectbox("Zona (Rural/Urbana)", ["","Rural","Urbana"], index=0,
+                            key=k("reg","zona_in"))
+        # ✅ Nuevo check: Paciente priorizado
+        paciente_priorizado = st.checkbox("Paciente priorizado", value=bool(st.session_state.get(k("reg","prio"), False)),
+                                          key=k("reg","priorizado_chk"))
+
+        st.divider()
+        st.markdown("**Estado de la atención**")
+        csa1, csa2, csa3 = st.columns(3)
+        atendido = csa1.selectbox("Atendido", ["No","Sí"], index=0, key=k("reg","aten"))
+        tipo_contacto = csa2.selectbox("Tipo de contacto", TIPO_CONTACTO, key=k("reg","tcont"))
+        duracion = csa3.number_input("Duración (min)", min_value=0, step=5, key=k("reg","dur"))
+        csa4, csa5 = st.columns(2)
+        registrado_panacea = csa4.checkbox("Atención registrada en Panacea", key=k("reg","regp"))
+        paciente_creado_panacea = csa5.checkbox("Paciente creado en Panacea", key=k("reg","pacp"))
+        observaciones = st.text_area("Observaciones", key=k("reg","obs"))
+
+        submitted = st.form_submit_button("Guardar atención", use_container_width=True)
+        if submitted:
+            if not documento or not nombre:
+                st.error("Documento y nombre del paciente son obligatorios.")
             else:
-                DATA.upsert_programa(pnom.strip()); success_toast("Programa agregado."); st.rerun()
-        st.dataframe(DATA.list_programas(), use_container_width=True, hide_index=True)
+                # Upsert Paciente, incluyendo priorizado ✅
+                upsert_paciente({
+                    "documento": documento,
+                    "nombre": nombre,
+                    "fecha_nacimiento": fecha_nacimiento,
+                    "sexo": sexo,
+                    "telefono": telefono,
+                    "email": email,
+                    "direccion": direccion,
+                    "localidad": localidad_p,
+                    "municipio": municipio_p,
+                    "departamento": departamento_p,
+                    "zona": zona,
+                    "priorizado": 1 if paciente_priorizado else 0
+                })
+                # Insert atención (snapshot incluye paciente_priorizado) ✅
+                insert_atencion({
+                    "fecha": str(fecha),
+                    "programa": programa,
+                    "convenio": convenio,
+                    "institucion": institucion,
+                    "departamento": departamento,
+                    "municipio": municipio,
+                    "localidad": localidad,
+                    "profesional": profesional,
+                    "documento": documento,
+                    "nombre": nombre,
+                    "actividad": actividad,
+                    "atendido": 1 if atendido == "Sí" else 0,
+                    "registrado_panacea": 1 if registrado_panacea else 0,
+                    "paciente_creado_panacea": 1 if paciente_creado_panacea else 0,
+                    "paciente_priorizado": 1 if paciente_priorizado else 0,  # ✅
+                    "tipo_contacto": tipo_contacto,
+                    "duracion_minutos": duracion,
+                    "observaciones": observaciones,
+                    "sexo": sexo,
+                    "fecha_nacimiento": fecha_nacimiento,
+                    "telefono": telefono,
+                    "email": email,
+                    "direccion": direccion,
+                    "zona": zona
+                })
+                st.success("Atención guardada correctamente.")
 
-    # Convenios
-    with tabs[1]:
-        progs = DATA.list_programas()
-        prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
-        c1, c2, c3 = st.columns([2, 2, 1])
-        cv_prog = c1.selectbox("Programa", options=list(prog_map.keys()) if prog_map else [], key="cfg_conv_prog")
-        cv_nom = c2.text_input("Nombre del convenio", key="cfg_conv_nombre")
-        if c3.button("Agregar convenio", use_container_width=True, key="cfg_btn_add_convenio"):
-            if not (cv_prog and cv_nom.strip()): warn_toast("Selecciona programa y nombre.")
-            else:
-                DATA.upsert_convenio(cv_nom.strip(), prog_map[cv_prog]); success_toast("Convenio agregado."); st.rerun()
-        st.dataframe(DATA.list_convenios(), use_container_width=True, hide_index=True)
+# ---------------------------------------------------------------------
+# UI: Carga masiva (Pacientes, Profesionales, Atenciones)
+# Incluye columna 'paciente_priorizado' para Atenciones ✅
+# ---------------------------------------------------------------------
+PLANTILLA_ATENCIONES_COLS = [
+    "fecha","programa","convenio","institucion","departamento","municipio","localidad",
+    "profesional","documento","nombre","actividad","atendido",
+    "registrado_panacea","paciente_creado_panacea","paciente_priorizado",  # ✅ aquí
+    "tipo_contacto","duracion_minutos","observaciones",
+    "sexo","fecha_nacimiento","telefono","email","direccion","zona"
+]
 
-    # Instituciones
-    with tabs[2]:
-        c1, c2, c3, c4, c5 = st.columns([2, 1.2, 1.2, 1.2, 1])
-        i_nom = c1.text_input("Nombre institución", key="cfg_inst_nombre")
-        i_loc = c2.text_input("Localidad", key="cfg_inst_localidad")
-        i_mun = c3.text_input("Municipio", key="cfg_inst_municipio")
-        i_dep = c4.text_input("Departamento", key="cfg_inst_departamento")
-        if c5.button("Agregar institución", use_container_width=True, key="cfg_btn_add_inst"):
-            if not i_nom.strip(): warn_toast("Escribe el nombre.")
-            else:
-                DATA.upsert_institucion(i_nom.strip(), i_loc or None, i_mun or None, i_dep or None)
-                success_toast("Institución agregada."); st.rerun()
-        st.dataframe(DATA.list_instituciones(), use_container_width=True, hide_index=True)
+def ui_cargas_masivas(user):
+    st.markdown("### Cargas masivas")
 
-        st.markdown("---")
-        st.markdown("### Carga masiva de instituciones")
-        file_inst = st.file_uploader("Archivo de instituciones (Excel o CSV)", type=["xlsx", "xls", "csv"], key="cfg_up_instituciones")
-        if file_inst is not None and st.button("Procesar instituciones", key="cfg_btn_proc_inst"):
-            try:
-                df_inst = read_table_upload(file_inst)
-                if "nombre" not in df_inst.columns:
-                    st.error(f"El archivo debe contener 'nombre'. Columnas: {list(df_inst.columns)}")
-                else:
-                    ok = 0
-                    for _, r in df_inst.iterrows():
-                        nom = str(r.get("nombre", "")).strip()
-                        if not nom: continue
-                        DATA.upsert_institucion(
-                            nom,
-                            str(r.get("localidad", "")).strip() or None if "localidad" in df_inst.columns else None,
-                            str(r.get("municipio", "")).strip() or None if "municipio" in df_inst.columns else None,
-                            str(r.get("departamento", "")).strip() or None if "departamento" in df_inst.columns else None,
-                        ); ok += 1
-                    success_toast(f"Se procesaron {ok} instituciones."); st.rerun()
-            except Exception as e:
-                st.error(f"Error procesando instituciones: {e}")
-
-    # Profesionales
-    with tabs[3]:
-        progs = DATA.list_programas()
-        prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
-        conv = DATA.list_convenios()
-        conv_map = {r["nombre"]: int(r["id"]) for _, r in conv.iterrows()} if not conv.empty else {}
-
-        c1, c2, c3, c4, c5, c6 = st.columns([2, 1.2, 1.4, 1.4, 1.2, 1.2])
-        f_nom = c1.text_input("Nombre profesional", key="cfg_prof_nombre")
-        f_doc = c2.text_input("Documento (opcional)", key="cfg_prof_doc")
-        f_email = c3.text_input("Email (opcional)", key="cfg_prof_email")
-        f_prog = c4.selectbox("Programa", options=list(prog_map.keys()) if prog_map else [], key="cfg_prof_prog")
-        f_conv = c5.selectbox("Convenio", options=list(conv_map.keys()) if conv_map else [], key="cfg_prof_conv")
-        zona_opts = ["(No especifica)", "Urbana", "Rural"]
-        f_zona = c6.selectbox("Zona (opcional)", options=zona_opts, key="cfg_prof_zona")
-
-        if st.button("Agregar profesional", use_container_width=True, key="cfg_btn_add_prof"):
-            if not f_nom.strip(): warn_toast("Escribe el nombre.")
-            else:
-                zona = None if f_zona == "(No especifica)" else f_zona
-                DATA.upsert_Profesional(f_nom.strip(), f_doc or None, f_email or None, prog_map.get(f_prog), conv_map.get(f_conv), zona)
-                success_toast("Profesional agregado."); st.rerun()
-
-        st.dataframe(DATA.list_Profesionales(), use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-        st.markdown("### Carga masiva de profesionales")
-        st.caption("Columnas: **nombre** (obligatoria), opcionales: documento, email, programa, convenio, zona (Rural/Urbana).")
-        file_prof = st.file_uploader("Archivo de profesionales", type=["xlsx", "xls", "csv"], key="cfg_up_profesionales")
-        if file_prof is not None and st.button("Procesar profesionales", key="cfg_btn_proc_prof"):
-            try:
-                df_prof = read_table_upload(file_prof)
-                if "nombre" not in df_prof.columns:
-                    st.error(f"El archivo debe contener 'nombre'. Columnas: {list(df_prof.columns)}")
-                else:
-                    progs2 = DATA.list_programas()
-                    prog_map2 = {r["nombre"]: int(r["id"]) for _, r in progs2.iterrows()} if not progs2.empty else {}
-                    conv2 = DATA.list_convenios()
-                    conv_map2 = {r["nombre"]: int(r["id"]) for _, r in conv2.iterrows()} if not conv2.empty else {}
-
-                    ok = 0
-                    for _, r in df_prof.iterrows():
-                        nom = str(r.get("nombre", "")).strip()
-                        if not nom: continue
-                        doc = str(r.get("documento", "")).strip() if pd.notna(r.get("documento")) else None
-                        email = str(r.get("email", "")).strip() if pd.notna(r.get("email")) else None
-                        p_name = str(r.get("programa", "")).strip() if pd.notna(r.get("programa")) else None
-                        c_name = str(r.get("convenio", "")).strip() if pd.notna(r.get("convenio")) else None
-                        zona = str(r.get("zona", "")).strip() if pd.notna(r.get("zona")) else None
-                        if zona not in ("Rural", "Urbana"): zona = None
-                        pid = prog_map2.get(p_name) if p_name else None
-                        cid = conv_map2.get(c_name) if c_name else None
-                        if p_name and not pid: pid = DATA.upsert_programa(p_name)
-                        if c_name and not cid and pid: cid = DATA.upsert_convenio(c_name, pid)
-                        DATA.upsert_Profesional(nom, doc, email, pid, cid, zona); ok += 1
-                    success_toast(f"Se procesaron {ok} profesionales."); st.rerun()
-            except Exception as e:
-                st.error(f"Error procesando profesionales: {e}")
-
+    st.markdown("**Plantillas de ejemplo (CSV):**")
+    ctpl1, ctpl2, ctpl3 = st.columns(3)
     # Pacientes
-    with tabs[4]:
-        st.markdown("### Gestión de pacientes")
-        c1, c2 = st.columns([1.2, 2])
-        cfg_doc = c1.text_input("Documento (cédula)", key="cfg_pac_doc")
-        cfg_nom = c2.text_input("Nombre completo", key="cfg_pac_nombre")
+    pac_tpl = pd.DataFrame([{
+        "documento":"12345678","nombre":"Juan Pérez","fecha_nacimiento":"2008-05-14",
+        "sexo":"M","telefono":"3001234567","email":"juan@example.com","direccion":"Calle 1 #2-3",
+        "localidad":"Usaquén","municipio":"Bogotá","departamento":"Cundinamarca","zona":"Urbana","priorizado":1
+    }])
+    ctpl1.download_button("Plantilla pacientes.csv", pac_tpl.to_csv(index=False).encode("utf-8"),
+                          file_name="plantilla_pacientes.csv", mime="text/csv", key=k("tpl","pac"))
+    # Profesionales
+    prof_tpl = pd.DataFrame([{
+        "documento":"987654","nombre":"Profe Demo","telefono":"3009876543","email":"profe@example.com",
+        "programa":"Programa Demo","convenio":"Convenio Demo"
+    }])
+    ctpl2.download_button("Plantilla profesionales.csv", prof_tpl.to_csv(index=False).encode("utf-8"),
+                          file_name="plantilla_profesionales.csv", mime="text/csv", key=k("tpl","prof"))
+    # Atenciones (incluye paciente_priorizado) ✅
+    atn_tpl = pd.DataFrame([{
+        "fecha":"2025-11-10","programa":"Programa Demo","convenio":"Convenio Demo","institucion":"Colegio A",
+        "departamento":"Cundinamarca","municipio":"Bogotá","localidad":"Usaquén","profesional":user["username"],
+        "documento":"12345678","nombre":"Juan Pérez","actividad":"VALORACION INICIAL POR PSICOLOGIA","atendido":"Si",
+        "registrado_panacea":"No","paciente_creado_panacea":"Si","paciente_priorizado":"Si",  # ✅
+        "tipo_contacto":"Presencial","duracion_minutos":30,"observaciones":"Demo","sexo":"M",
+        "fecha_nacimiento":"2008-05-14","telefono":"3001234567","email":"juan@example.com",
+        "direccion":"Calle 1 #2-3","zona":"Urbana"
+    }])
+    ctpl3.download_button("Plantilla atenciones.csv", atn_tpl.to_csv(index=False).encode("utf-8"),
+                          file_name="plantilla_atenciones.csv", mime="text/csv", key=k("tpl","atn"))
 
-        c3, c4, c5 = st.columns([1, 1, 1])
-        cfg_nac = c3.text_input("Fecha de nacimiento (AAAA-MM-DD, opcional)", key="cfg_pac_fecha_nac")
-        sexo_opts = ["(No especifica)", "F", "M", "Otro"]
-        cfg_sexo = c4.selectbox("Sexo (opcional)", sexo_opts, key="cfg_pac_sexo")
-        cfg_tel = c5.text_input("Teléfono (opcional)", key="cfg_pac_tel")
+    st.divider()
+    tabs = st.tabs(["Pacientes","Profesionales","Atenciones"])
 
-        c6, c7 = st.columns([1, 1])
-        cfg_email = c6.text_input("Email (opcional)", key="cfg_pac_email")
-        cfg_dir = c7.text_input("Dirección (opcional)", key="cfg_pac_dir")
-
-        c8, c9, c10 = st.columns([1, 1, 1])
-        cfg_loc = c8.text_input("Localidad (opcional)", key="cfg_pac_loc")
-        cfg_mun = c9.text_input("Municipio (opcional)", key="cfg_pac_mun")
-        cfg_dep = c10.text_input("Departamento (opcional)", key="cfg_pac_dep")
-
-        zc1, _ = st.columns([1, 3])
-        zona_opts = ["(No especifica)", "Urbana", "Rural"]
-        cfg_zona = zc1.selectbox("Zona (opcional)", zona_opts, key="cfg_pac_zona")
-
-        if st.button("Guardar / actualizar paciente", key="cfg_btn_guardar_paciente"):
-            if not cfg_doc.strip() or not cfg_nom.strip():
-                warn_toast("Documento y nombre son obligatorios.")
-            else:
-                try:
-                    DATA.upsert_paciente(
-                        cfg_doc.strip(), cfg_nom.strip(), cfg_nac or None,
-                        None if cfg_sexo == "(No especifica)" else cfg_sexo,
-                        cfg_tel or None, cfg_email or None, cfg_dir or None,
-                        cfg_loc or None, cfg_mun or None, cfg_dep or None,
-                        None if cfg_zona == "(No especifica)" else cfg_zona,
-                    ); success_toast("Paciente guardado/actualizado."); st.rerun()
-                except Exception as e:
-                    error_toast(f"No se pudo guardar: {e}")
-
-        st.dataframe(DATA.list_pacientes(), use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-        st.markdown("### Carga masiva de pacientes")
-        st.caption("Obligatorias: **documento**, **nombre**. Opcionales: fecha_nacimiento, sexo, telefono, email, direccion, localidad, municipio, departamento, zona (Rural/Urbana).")
-        file_pac = st.file_uploader("Archivo de pacientes (Excel o CSV)", type=["xlsx", "xls", "csv"], key="cfg_up_pacientes")
-        if file_pac is not None and st.button("Procesar pacientes", key="cfg_btn_proc_pac"):
+    # --- Pacientes
+    with tabs[0]:
+        up = st.file_uploader("Cargar Pacientes (CSV/Excel)", key=k("up","pac"))
+        if st.button("Procesar Pacientes", key=k("btn","pac")):
             try:
-                df_pac = read_table_upload(file_pac)
-                if not {"documento", "nombre"}.issubset(df_pac.columns):
-                    st.error(f"El archivo debe contener 'documento' y 'nombre'. Columnas detectadas: {list(df_pac.columns)}")
+                df = read_table_file(up)
+                # Validación mínima
+                need = {"documento","nombre"}
+                if not need.issubset(set(map(str.lower, df.columns))):
+                    st.error("El archivo debe contener al menos las columnas 'documento' y 'nombre'.")
                 else:
-                    ok = 0
-                    for _, r in df_pac.iterrows():
-                        doc = str(r.get("documento", "")).strip()
-                        nom = str(r.get("nombre", "")).strip()
-                        if not doc or not nom: continue
-                        zona = str(r.get("zona", "")).strip() if "zona" in df_pac.columns and pd.notna(r.get("zona")) else None
-                        if zona not in ("Rural", "Urbana"): zona = None
-                        DATA.upsert_paciente(
-                            numero_documento=doc, nombre=nom,
-                            fecha_nacimiento=str(r.get("fecha_nacimiento")) if "fecha_nacimiento" in df_pac.columns and pd.notna(r.get("fecha_nacimiento")) else None,
-                            sexo=str(r.get("sexo")).strip() if "sexo" in df_pac.columns and pd.notna(r.get("sexo")) else None,
-                            telefono=str(r.get("telefono")).strip() if "telefono" in df_pac.columns and pd.notna(r.get("telefono")) else None,
-                            email=str(r.get("email")).strip() if "email" in df_pac.columns and pd.notna(r.get("email")) else None,
-                            direccion=str(r.get("direccion")).strip() if "direccion" in df_pac.columns and pd.notna(r.get("direccion")) else None,
-                            localidad=str(r.get("localidad")).strip() if "localidad" in df_pac.columns and pd.notna(r.get("localidad")) else None,
-                            municipio=str(r.get("municipio")).strip() if "municipio" in df_pac.columns and pd.notna(r.get("municipio")) else None,
-                            departamento=str(r.get("departamento")).strip() if "departamento" in df_pac.columns and pd.notna(r.get("departamento")) else None,
-                            zona=zona,
-                        ); ok += 1
-                    success_toast(f"Se procesaron {ok} pacientes."); st.rerun()
+                    # Normalizamos mínimo juego de columnas
+                    low = {c.lower(): c for c in df.columns}
+                    for _, r in df.iterrows():
+                        row = {c: r[low[c]] if c in low else None for c in
+                               ["documento","nombre","fecha_nacimiento","sexo","telefono","email",
+                                "direccion","localidad","municipio","departamento","zona","priorizado"]}
+                        # Map si priorizado viene como texto
+                        pr = row.get("priorizado")
+                        if isinstance(pr, str):
+                            pr = 1 if pr.strip().lower() in ("si","sí","1","true","x") else 0
+                        row["priorizado"] = int(pr or 0)
+                        upsert_paciente(row)
+                    st.success("Pacientes procesados.")
             except Exception as e:
                 st.error(f"Error procesando pacientes: {e}")
 
-# ---------------- MAIN ----------------
+    # --- Profesionales
+    with tabs[1]:
+        up = st.file_uploader("Cargar Profesionales (CSV/Excel)", key=k("up","prof"))
+        if st.button("Procesar Profesionales", key=k("btn","prof")):
+            try:
+                df = read_table_file(up)
+                need = {"documento","nombre"}
+                if not need.issubset(set(map(str.lower, df.columns))):
+                    st.error("El archivo debe contener al menos las columnas 'documento' y 'nombre'.")
+                else:
+                    cx = db()
+                    low = {c.lower(): c for c in df.columns}
+                    with cx:
+                        for _, r in df.iterrows():
+                            doc = str(r[low["documento"]])
+                            nombre = str(r[low["nombre"]])
+                            telefono = str(r[low.get("telefono","")]) if "telefono" in low else ""
+                            email = str(r[low.get("email","")]) if "email" in low else ""
+                            programa = str(r[low.get("programa","")]) if "programa" in low else ""
+                            convenio = str(r[low.get("convenio","")]) if "convenio" in low else ""
+                            cur = cx.execute("SELECT id FROM profesionales WHERE documento=?", (doc,)).fetchone()
+                            if cur:
+                                cx.execute("""UPDATE profesionales SET
+                                    nombre=?, telefono=?, email=?, programa=?, convenio=?
+                                    WHERE documento=?""", (nombre, telefono, email, programa, convenio, doc))
+                            else:
+                                cx.execute("""INSERT INTO profesionales(
+                                    documento, nombre, telefono, email, programa, convenio
+                                ) VALUES(?,?,?,?,?,?)""", (doc, nombre, telefono, email, programa, convenio))
+                    st.success("Profesionales procesados.")
+            except Exception as e:
+                st.error(f"Error procesando profesionales: {e}")
+
+    # --- Atenciones (incluye paciente_priorizado) ✅
+    with tabs[2]:
+        up = st.file_uploader("Cargar Atenciones (CSV/Excel)", key=k("up","atn"))
+        st.caption("Columnas esperadas (mínimas): documento, nombre, fecha, actividad. "
+                   "Opcionales: paciente_creado_panacea, registrado_panacea, paciente_priorizado, etc.")
+        if st.button("Procesar Atenciones", key=k("btn","atn")):
+            try:
+                df = read_table_file(up)
+                # Normalizar columnas a minúsculas y strip
+                df.columns = [c.strip() for c in df.columns]
+                low = {c.lower(): c for c in df.columns}
+
+                # Validación mínima
+                need = {"documento","nombre","fecha","actividad"}
+                if not need.issubset(set(map(str.lower, df.columns))):
+                    st.error("El archivo debe contener columnas mínimas: documento, nombre, fecha, actividad.")
+                else:
+                    for _, r in df.iterrows():
+                        # Map base paciente
+                        pac = {
+                            "documento": str(r[low["documento"]]).strip(),
+                            "nombre": str(r[low["nombre"]]).strip(),
+                            "fecha_nacimiento": str(r[low["fecha_nacimiento"]]).strip() if "fecha_nacimiento" in low else "",
+                            "sexo": str(r[low["sexo"]]).strip() if "sexo" in low else "",
+                            "telefono": str(r[low["telefono"]]).strip() if "telefono" in low else "",
+                            "email": str(r[low["email"]]).strip() if "email" in low else "",
+                            "direccion": str(r[low["direccion"]]).strip() if "direccion" in low else "",
+                            "localidad": str(r[low["localidad"]]).strip() if "localidad" in low else "",
+                            "municipio": str(r[low["municipio"]]).strip() if "municipio" in low else "",
+                            "departamento": str(r[low["departamento"]]).strip() if "departamento" in low else "",
+                            "zona": str(r[low["zona"]]).strip() if "zona" in low else "",
+                            "priorizado": 0
+                        }
+                        # priorizado puede venir como Si/No, 1/0, True/False
+                        if "paciente_priorizado" in low:
+                            pv = str(r[low["paciente_priorizado"]]).strip().lower()
+                            pac["priorizado"] = 1 if pv in ("si","sí","1","true","x") else 0
+
+                        upsert_paciente(pac)  # sincroniza ficha
+
+                        # Map atención
+                        def to_int_bool(val):
+                            s = str(val).strip().lower()
+                            return 1 if s in ("si","sí","1","true","x") else 0
+
+                        atn = {
+                            "fecha": str(r[low["fecha"]]).strip(),
+                            "programa": str(r[low["programa"]]).strip() if "programa" in low else "",
+                            "convenio": str(r[low["convenio"]]).strip() if "convenio" in low else "",
+                            "institucion": str(r[low["institucion"]]).strip() if "institucion" in low else "",
+                            "departamento": pac["departamento"],
+                            "municipio": pac["municipio"],
+                            "localidad": pac["localidad"],
+                            "profesional": str(r[low["profesional"]]).strip() if "profesional" in low else user["username"],
+                            "documento": pac["documento"],
+                            "nombre": pac["nombre"],
+                            "actividad": str(r[low["actividad"]]).strip(),
+                            "atendido": to_int_bool(r[low["atendido"]]) if "atendido" in low else 0,
+                            "registrado_panacea": to_int_bool(r[low["registrado_panacea"]]) if "registrado_panacea" in low else 0,
+                            "paciente_creado_panacea": to_int_bool(r[low["paciente_creado_panacea"]]) if "paciente_creado_panacea" in low else 0,
+                            "paciente_priorizado": pac["priorizado"],  # snapshot ✅
+                            "tipo_contacto": str(r[low["tipo_contacto"]]).strip() if "tipo_contacto" in low else "",
+                            "duracion_minutos": int(r[low["duracion_minutos"]]) if "duracion_minutos" in low and pd.notna(r[low["duracion_minutos"]]) else 0,
+                            "observaciones": str(r[low["observaciones"]]).strip() if "observaciones" in low else "",
+                            "sexo": pac["sexo"],
+                            "fecha_nacimiento": pac["fecha_nacimiento"],
+                            "telefono": pac["telefono"],
+                            "email": pac["email"],
+                            "direccion": pac["direccion"],
+                            "zona": pac["zona"]
+                        }
+                        insert_atencion(atn)
+                    st.success("Atenciones procesadas.")
+            except Exception as e:
+                st.error(f"Error procesando atenciones: {e}")
+
+# ---------------------------------------------------------------------
+# UI: Listado simple
+# ---------------------------------------------------------------------
+def ui_listado(user):
+    st.markdown("### Listado de atenciones")
+    cx = db()
+    df = pd.read_sql_query("SELECT * FROM atenciones ORDER BY date(fecha) DESC, id DESC", cx)
+    st.dataframe(df, use_container_width=True)
+
+# ---------------------------------------------------------------------
+# UI: Viáticos, Planificador, Papelería (simples)
+# ---------------------------------------------------------------------
+def ui_viaticos(user):
+    st.markdown("### Viáticos")
+    with st.form(key=k("via","form")):
+        req = st.selectbox("¿Requiere viáticos?", ["No","Sí"], key=k("via","req"))
+        origen = st.text_input("Origen", key=k("via","ori"))
+        destino = st.text_input("Destino", key=k("via","des"))
+        valor = st.number_input("Valor", min_value=0.0, step=1000.0, key=k("via","val"))
+        obs = st.text_area("Observaciones", key=k("via","obs"))
+        if st.form_submit_button("Guardar viático", use_container_width=True):
+            cx = db()
+            with cx:
+                cx.execute("""INSERT INTO viaticos(username,requiere,origen,destino,valor,observaciones,fecha)
+                              VALUES(?,?,?,?,?,?,?)""",
+                           (user["username"], 1 if req=="Sí" else 0, origen, destino, valor, obs, str(date.today())))
+            st.success("Viático guardado.")
+    st.subheader("Historial")
+    cx = db()
+    df = pd.read_sql_query("SELECT * FROM viaticos WHERE username=? ORDER BY id DESC", cx, params=(user["username"],))
+    st.dataframe(df, use_container_width=True)
+
+def ui_planificador(user):
+    st.markdown("### Planificador")
+    with st.form(key=k("pla","form")):
+        f = st.date_input("Fecha", value=date.today(), key=k("pla","f"))
+        h1 = st.time_input("Hora inicio", value=time(8,0), key=k("pla","h1"))
+        h2 = st.time_input("Hora fin", value=time(9,0), key=k("pla","h2"))
+        titulo = st.text_input("Título", key=k("pla","tit"))
+        desc = st.text_area("Descripción", key=k("pla","des"))
+        programa = st.text_input("Programa (opcional)", key=k("pla","prog"))
+        convenio = st.text_input("Convenio (opcional)", key=k("pla","conv"))
+        institucion = st.text_input("Institución (opcional)", key=k("pla","inst"))
+        if st.form_submit_button("Guardar evento", use_container_width=True):
+            cx = db()
+            with cx:
+                cx.execute("""INSERT INTO planificador(username,fecha,hora_ini,hora_fin,titulo,descripcion,programa,convenio,institucion)
+                              VALUES(?,?,?,?,?,?,?,?,?)""",
+                           (user["username"], str(f), str(h1), str(h2), titulo, desc, programa, convenio, institucion))
+            st.success("Evento guardado.")
+    st.subheader("Mis eventos")
+    cx = db()
+    df = pd.read_sql_query("SELECT * FROM planificador WHERE username=? ORDER BY date(fecha) DESC, id DESC",
+                           cx, params=(user["username"],))
+    st.dataframe(df, use_container_width=True)
+
+def ui_papeleria(user):
+    st.markdown("### Papelería")
+    with st.form(key=k("pap","form")):
+        item = st.text_input("Item", key=k("pap","item"))
+        cant = st.number_input("Cantidad", min_value=1, step=1, key=k("pap","cant"))
+        estado = st.selectbox("Estado", ["Solicitado","Aprobado","Entregado"], key=k("pap","est"))
+        obs = st.text_area("Observaciones", key=k("pap","obs"))
+        if st.form_submit_button("Guardar solicitud", use_container_width=True):
+            cx = db()
+            with cx:
+                cx.execute("""INSERT INTO papeleria(username,item,cantidad,estado,observaciones,fecha)
+                              VALUES(?,?,?,?,?,?)""", (user["username"], item, cant, estado, obs, str(date.today())))
+            st.success("Solicitud registrada.")
+    st.subheader("Mis solicitudes")
+    cx = db()
+    df = pd.read_sql_query("SELECT * FROM papeleria WHERE username=? ORDER BY id DESC", cx, params=(user["username"],))
+    st.dataframe(df, use_container_width=True)
+
+# ---------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------
 def main():
-    st.markdown(f"# {APP_ICON} {APP_TITLE}")
-    st.caption("Base SQLite local (`productividad_Profesionales.db`). Usuarios del mismo enlace comparten la misma información.")
-    sidebar_filters()
-    render_login()
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    ensure_schema()
+    st.title(APP_TITLE)
 
-    if not st.session_state.user:
-        st.info("Inicia sesión para usar el aplicativo."); return
+    user = st.session_state.get("user")
+    if not user:
+        ui_login()
+        return
 
-    user = st.session_state.user
-    role = st.session_state.role
-
-    tabs_admin = ["Registrar atenciones", "Listado", "Dashboard", "Reportes", "Viáticos", "Planificador", "Papelería", "Configuración"]
-    tabs_pro = ["Registrar atenciones", "Listado", "Viáticos", "Planificador", "Papelería"]
-    tabs = st.tabs(tabs_admin if role == "admin" else tabs_pro)
-
-    if role == "admin":
-        with tabs[0]: ui_cargar_datos(user)
-        with tabs[1]: ui_registros()
-        with tabs[2]: ui_dashboard()
-        with tabs[3]: ui_reportes()
-        with tabs[4]: ui_viaticos(user)
-        with tabs[5]: ui_planificador(user)
-        with tabs[6]: ui_papeleria(user)
-        with tabs[7]: ui_configuracion()
+    # Tabs por rol
+    if user["role"] == "Admin":
+        tabs = st.tabs(["Registrar atenciones","Cargas masivas","Listado","Viáticos","Planificador","Papelería"])
     else:
-        with tabs[0]: ui_cargar_datos(user)
-        with tabs[1]: ui_registros()
-        with tabs[2]: ui_viaticos(user)
-        with tabs[3]: ui_planificador(user)
-        with tabs[4]: ui_papeleria(user)
+        tabs = st.tabs(["Registrar atenciones","Cargas masivas","Listado","Viáticos","Planificador","Papelería"])
+
+    with tabs[0]:
+        ui_registrar_atenciones(user)
+    with tabs[1]:
+        ui_cargas_masivas(user)
+    with tabs[2]:
+        ui_listado(user)
+    with tabs[3]:
+        ui_viaticos(user)
+    with tabs[4]:
+        ui_planificador(user)
+    with tabs[5]:
+        ui_papeleria(user)
+
+    st.sidebar.info(f"Usuario: **{user['username']}** · Rol: **{user['role']}**")
+    if st.sidebar.button("Cerrar sesión"):
+        st.session_state.pop("user", None)
+        st.rerun()
 
 if __name__ == "__main__":
     main()
-
