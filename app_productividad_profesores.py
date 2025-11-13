@@ -1,4 +1,4 @@
-# app_productividad_profesores.py (con campo "paciente_priorizado")
+# app_productividad_profesores.py
 from datetime import datetime, date, time as dtime
 from typing import Optional, Dict, Any, List, Tuple
 import io
@@ -22,6 +22,13 @@ ACTIVIDADES_PLANTILLAS = [
 ]
 TIPOS_CONTACTO = ["Presencial", "Virtual", "Telefónico", "Otro"]
 
+# Opciones visibles SOLO cuando el paciente está priorizado
+PRIORIZADO_ORIGEN_OPTS = [
+    "SG -SST FOMAG",
+    "Directivas del colegio",
+    "Psicólogo contigo profe en aula",
+]
+
 # Usuarios demo
 USERS = {
     "admin": {"password": "admin123", "role": "admin"},
@@ -34,7 +41,7 @@ st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
 def _slug_col(s: str) -> str:
     if s is None:
         return ""
-    s = str(s).replace("\ufeff", "")  # BOM
+    s = str(s).replace("﻿", "")  # BOM
     s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c))
     s = s.lower().strip()
@@ -79,9 +86,11 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "creado_panacea": "paciente_creado_panacea",
         "paciente_creado": "paciente_creado_panacea",
 
-        # paciente priorizado (nuevo)
+        # priorizado (nuevo)
         "priorizado": "paciente_priorizado",
         "es_priorizado": "paciente_priorizado",
+        "priorizado_origen": "priorizado_origen",
+        "origen_priorizacion": "priorizado_origen",
     }
     df = df.rename(columns={c: synonyms.get(c, c) for c in df.columns})
 
@@ -93,7 +102,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     for key_col in ("documento", "nombre"):
         if key_col in df.columns:
             df[key_col] = (
-                df[key_col].astype(str).str.replace("\u200b", "", regex=False).str.strip()
+                df[key_col].astype(str).str.replace("​", "", regex=False).str.strip()
             )
     return df
 
@@ -248,9 +257,10 @@ SQLITE_DDL = {
         nombre_paciente TEXT,
         actividad TEXT,
         atendido INTEGER,
-        registrado_panacea INTEGER,           -- atención registrada (NO el paciente)
-        paciente_creado_panacea INTEGER,      -- paciente creado en Panacea
-        paciente_priorizado INTEGER,          -- ⬅️ NUEVO campo
+        registrado_panacea INTEGER,
+        paciente_creado_panacea INTEGER,
+        paciente_priorizado INTEGER,
+        priorizado_origen TEXT,
         duracion_minutos INTEGER,
         tipo_contacto TEXT,
         pacientes_programados INTEGER NOT NULL,
@@ -346,10 +356,11 @@ def ensure_sqlite_schema():
             "atendido": "ALTER TABLE registros ADD COLUMN atendido INTEGER;",
             "registrado_panacea": "ALTER TABLE registros ADD COLUMN registrado_panacea INTEGER;",
             "paciente_creado_panacea": "ALTER TABLE registros ADD COLUMN paciente_creado_panacea INTEGER;",
-            "paciente_priorizado": "ALTER TABLE registros ADD COLUMN paciente_priorizado INTEGER;",
             "duracion_minutos": "ALTER TABLE registros ADD COLUMN duracion_minutos INTEGER;",
             "tipo_contacto": "ALTER TABLE registros ADD COLUMN tipo_contacto TEXT;",
             "paciente_id": "ALTER TABLE registros ADD COLUMN paciente_id INTEGER;",
+            "paciente_priorizado": "ALTER TABLE registros ADD COLUMN paciente_priorizado INTEGER;",
+            "priorizado_origen": "ALTER TABLE registros ADD COLUMN priorizado_origen TEXT;",
         }
         for c, stmt in add_cols.items():
             if c not in have:
@@ -428,7 +439,8 @@ class DataAccess:
                 (nombre.strip(), programa_id),
             )
         r = self.db.execute(
-            "SELECT id FROM convenios WHERE nombre=? AND programa_id=?", (nombre.strip(), programa_id)
+            "SELECT id FROM convenios WHERE nombre=? AND programa_id=
+?", (nombre.strip(), programa_id)
         ).fetchone()
         return int(r[0])
 
@@ -515,7 +527,7 @@ class DataAccess:
     def insert_registro(
         self, fecha: date, programa_id: int, convenio_id: int, institucion_id: int, profesor_id: int,
         paciente_id: Optional[int], localidad, municipio, departamento, numero_paciente, nombre_paciente,
-        actividad, atendido, registrado_panacea, paciente_creado_panacea, paciente_priorizado,
+        actividad, atendido, registrado_panacea, paciente_creado_panacea, paciente_priorizado, priorizado_origen,
         duracion_minutos, tipo_contacto, observaciones, creado_por
     ) -> None:
         row = {
@@ -532,9 +544,10 @@ class DataAccess:
             "nombre_paciente": (nombre_paciente or "").strip() or None,
             "actividad": actividad,
             "atendido": 1 if atendido else 0,
-            "registrado_panacea": 1 if registrado_panacea else 0,          # atención
-            "paciente_creado_panacea": 1 if paciente_creado_panacea else 0, # paciente
-            "paciente_priorizado": 1 if paciente_priorizado else 0,         # NUEVO
+            "registrado_panacea": 1 if registrado_panacea else 0,
+            "paciente_creado_panacea": 1 if paciente_creado_panacea else 0,
+            "paciente_priorizado": 1 if paciente_priorizado else 0,
+            "priorizado_origen": priorizado_origen,
             "duracion_minutos": int(duracion_minutos) if duracion_minutos is not None else None,
             "tipo_contacto": tipo_contacto,
             "pacientes_programados": 1,
@@ -571,7 +584,7 @@ class DataAccess:
             if filtros.get(k):
                 q += f" AND r.{k}=?"; params.append(filtros[k])
         if filtros.get("actividad"):
-            q += " AND r.actividad=?"; params.append(filtros["actividad"])
+            q += " AND r.actividad=?"; params.append(filtros["actividad"]) 
         q += " ORDER BY r.fecha DESC, r.id DESC"
 
         df = pd.read_sql_query(q, self.db, params=params)
@@ -826,8 +839,9 @@ def plantilla_atenciones_df() -> pd.DataFrame:
         "profesional", "documento", "nombre", "actividad",
         "atendido",
         "registrado_panacea",        # atención registrada
-        "paciente_creado_panacea",   # nuevo campo
-        "paciente_priorizado",       # NUEVO campo en plantilla
+        "paciente_creado_panacea",   # paciente creado en Panacea
+        "paciente_priorizado",       # NUEVO
+        "priorizado_origen",         # NUEVO (si está priorizado)
         "tipo_contacto", "duracion_minutos", "observaciones",
         "sexo", "fecha_nacimiento", "telefono", "email", "direccion", "zona"
     ]
@@ -842,12 +856,20 @@ def parse_fecha(value) -> str:
     except Exception:
         return date.today().strftime("%Y-%m-%d")
 
+# Mapeo tolerante de origen de priorización
+_prior_map = {s.lower(): s for s in PRIORIZADO_ORIGEN_OPTS}
+
+def canonical_priorizado_origen(val: Optional[str]) -> Optional[str]:
+    if not val: return None
+    s = str(val).strip().lower()
+    return _prior_map.get(s)
+
 def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, List[str]]:
     """
     Columnas mínimas: fecha, programa, convenio, institucion, profesional, documento, nombre, actividad
-    Opcionales: departamento, municipio, localidad, atendido, registrado_panacea, paciente_creado_panacea, paciente_priorizado,
-                tipo_contacto, duracion_minutos, observaciones, sexo, fecha_nacimiento, telefono, email,
-                direccion, zona
+    Opcionales: departamento, municipio, localidad, atendido, registrado_panacea, paciente_creado_panacea,
+                paciente_priorizado, priorizado_origen, tipo_contacto, duracion_minutos, observaciones, sexo,
+                fecha_nacimiento, telefono, email, direccion, zona
     """
     df = df.copy()
     req = {"fecha", "programa", "convenio", "institucion", "profesional", "documento", "nombre", "actividad"}
@@ -911,9 +933,9 @@ def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, L
             reg_field_pac = next((c for c in ["paciente_creado_panacea","paciente_en_panacea","creado_panacea","paciente_creado"] if c in df.columns), None)
             paciente_creado_panacea = bool(str2bool(r.get(reg_field_pac))) if reg_field_pac else False
 
-            # paciente priorizado (nuevo)
-            reg_field_pri = next((c for c in ["paciente_priorizado","priorizado","es_priorizado"] if c in df.columns), None)
-            paciente_priorizado = bool(str2bool(r.get(reg_field_pri))) if reg_field_pri else False
+            # priorización
+            paciente_priorizado = bool(str2bool(r.get("paciente_priorizado"))) if "paciente_priorizado" in df.columns else False
+            priorizado_origen = canonical_priorizado_origen(r.get("priorizado_origen")) if paciente_priorizado else None
 
             tipo_contacto = str(r.get("tipo_contacto")).strip() if pd.notna(r.get("tipo_contacto")) else None
             if tipo_contacto in ("", "(no especifica)", "no especifica"): tipo_contacto = None
@@ -929,7 +951,8 @@ def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, L
                 actividad=actividad, atendido=atendido,
                 registrado_panacea=registrado_panacea,
                 paciente_creado_panacea=paciente_creado_panacea,
-                paciente_priorizado=paciente_priorizado,  # ⬅️ nuevo
+                paciente_priorizado=paciente_priorizado,
+                priorizado_origen=priorizado_origen,
                 duracion_minutos=duracion, tipo_contacto=tipo_contacto,
                 observaciones=(str(r.get("observaciones")).strip() if pd.notna(r.get("observaciones")) else None),
                 creado_por=auth_user,
@@ -952,8 +975,9 @@ def ui_cargar_datos(auth_user: Optional[str]):
         K("pac_nombre"): "", K("pac_fecha_nac"): "", K("pac_telefono"): "", K("pac_email"): "",
         K("pac_direccion"): "", K("pac_localidad"): "", K("pac_municipio"): "", K("pac_departamento"): "",
         K("pac_sexo"): "(No especifica)", K("pac_zona"): "(No especifica)", K("pac_id_actual"): None, K("pac_doc"): "",
-        K("pac_creado_panacea"): False,   # paciente creado
-        K("pac_priorizado"): False,       # ⬅️ NUEVO default
+        K("pac_creado_panacea"): False,
+        K("pac_priorizado"): False,
+        K("priorizado_origen"): None,
     }
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
@@ -1060,18 +1084,31 @@ def ui_cargar_datos(auth_user: Optional[str]):
     st.session_state.setdefault(K("pac_zona"), "(No especifica)")
     zcol.selectbox("Zona (Rural/Urbana)", options=zona_opts, key=K("pac_zona"))
 
-    # ----- NUEVOS CHECKS -----
-    checks1, checks2, checks3 = st.columns([1, 1, 1])
-    checks1.checkbox("Paciente creado en Panacea", key=K("pac_creado_panacea"))  # paciente
-    checks2.checkbox("Paciente priorizado", key=K("pac_priorizado"))            # ⬅️ NUEVO
-    checks3.checkbox("Atención registrada en Panacea", key=K("reg_panacea"))     # atención
+    # ----- CHECKS Y ORIGEN PRIORIZADO -----
+    # Paciente creado en Panacea (paciente)
+    zcol2.checkbox("Paciente creado en Panacea", key=K("pac_creado_panacea"))
+
+    c9, c10 = st.columns([1, 1])
+    c9.radio("¿Atendido?", ["No", "Sí"], index=1, horizontal=True, key=K("atendido"))
+    c10.checkbox("Atención registrada en Panacea", key=K("reg_panacea"))
+
+    # Priorizado + combo dependiente
+    pr1, pr2 = st.columns([1, 1])
+    pr1.checkbox("Paciente priorizado", key=K("pac_priorizado"))
+    if st.session_state.get(K("pac_priorizado")):
+        # Mostrar el desplegable con las opciones indicadas
+        pr2.selectbox(
+            "Origen de priorización",
+            options=PRIORIZADO_ORIGEN_OPTS,
+            key=K("priorizado_origen"),
+        )
+    else:
+        # Ocultar/limpiar cuando no aplique
+        st.session_state[K("priorizado_origen")] = None
 
     c11, c12 = st.columns([1, 1])
     c11.selectbox("Tipo de contacto", options=["(No especifica)"] + TIPOS_CONTACTO, key=K("tipo_contacto"))
     c12.number_input("Duración de la atención (minutos, opcional)", min_value=0, max_value=480, step=5, key=K("duracion_minutos"))
-
-    c9, _ = st.columns([1, 3])
-    c9.radio("¿Atendido?", ["No", "Sí"], index=1, horizontal=True, key=K("atendido"))
 
     observaciones = st.text_area("Observaciones", key=K("observaciones"))
 
@@ -1085,6 +1122,9 @@ def ui_cargar_datos(auth_user: Optional[str]):
         if not institucion_id: faltantes.append("Institución")
         if not (st.session_state.get(K("pac_doc")) or "").strip(): faltantes.append("Documento del paciente")
         if not (st.session_state.get(K("pac_nombre")) or "").strip(): faltantes.append("Nombre del paciente")
+        # si es priorizado, exigir origen
+        if st.session_state.get(K("pac_priorizado")) and not st.session_state.get(K("priorizado_origen")):
+            faltantes.append("Origen de priorización")
 
         if faltantes:
             error_toast("Faltan datos obligatorios: " + ", ".join(faltantes))
@@ -1120,9 +1160,10 @@ def ui_cargar_datos(auth_user: Optional[str]):
                     nombre_paciente=(st.session_state[K("pac_nombre")] or "").strip(),
                     actividad=st.session_state[K("actividad")],
                     atendido=True if st.session_state[K("atendido")] == "Sí" else False,
-                    registrado_panacea=bool(st.session_state[K("reg_panacea")]),          # atención
-                    paciente_creado_panacea=bool(st.session_state[K("pac_creado_panacea")]),  # paciente
-                    paciente_priorizado=bool(st.session_state[K("pac_priorizado")]),       # ⬅️ nuevo
+                    registrado_panacea=bool(st.session_state[K("reg_panacea")]),
+                    paciente_creado_panacea=bool(st.session_state[K("pac_creado_panacea")]),
+                    paciente_priorizado=bool(st.session_state[K("pac_priorizado")]),
+                    priorizado_origen=st.session_state.get(K("priorizado_origen")),
                     duracion_minutos=dur_val, tipo_contacto=tipo_contacto_val,
                     observaciones=observaciones, creado_por=auth_user,
                 )
@@ -1154,8 +1195,8 @@ def ui_cargar_datos(auth_user: Optional[str]):
 
         st.caption("**Obligatorias**: fecha, programa, convenio, institucion, profesional, documento, nombre, actividad. "
                    "**Opcionales**: departamento, municipio, localidad, atendido, registrado_panacea (atención), "
-                   "paciente_creado_panacea (paciente), paciente_priorizado, tipo_contacto, duracion_minutos, observaciones, sexo, fecha_nacimiento, "
-                   "telefono, email, direccion, zona.")
+                   "paciente_creado_panacea (paciente), **paciente_priorizado** y **priorizado_origen** (si aplica), "
+                   "tipo_contacto, duracion_minutos, observaciones, sexo, fecha_nacimiento, telefono, email, direccion, zona.")
 
         up = st.file_uploader("Archivo de atenciones", type=["xlsx", "xls", "csv"], key=KM("file"))
         if up is not None and st.button("Procesar atenciones", type="primary", use_container_width=True, key=KM("btn")):
@@ -1186,8 +1227,8 @@ def ui_registros():
         "id","fecha","programa","convenio","institucion","profesor","actividad",
         "numero_paciente","nombre_paciente","tipo_contacto","duracion_minutos",
         "atendido",
-        "paciente_priorizado",       # ⬅️ nuevo visible
-        "paciente_creado_panacea",   # visible
+        "paciente_creado_panacea",
+        "paciente_priorizado","priorizado_origen",
         "registrado_panacea",
         "pacientes_programados","pacientes_atendidos",
         "no_asistieron","tasa_atencion_%","observaciones","creado_por","creado_en","actualizado_en",
@@ -1239,12 +1280,11 @@ def ui_dashboard():
     k8.metric("Atención en Panacea / brecha", f"{total_pan} / {brecha}")
 
     k9, k10 = st.columns([1, 1])
-    k9.metric("Pacientes creados en Panacea (en registros)", f"{total_pac_creados:,}".replace(",", "."))
-    k10.metric("Pacientes priorizados", f"{total_priorizados:,}".replace(",", "."))
+    k9.metric("Pacientes creados en Panacea (registros)", f"{total_pac_creados:,}".replace(",", "."))
+    k10.metric("Pacientes priorizados (registros)", f"{total_priorizados:,}".replace(",", "."))
 
     tdf = (
-        df.groupby(pd.Grouper(key="fecha", freq="W"))[ ["pacientes_programados", "pacientes_atendidos"] ]
-        .sum().reset_index()
+        df.groupby(pd.Grouper(key="fecha", freq="W"))["pacientes_programados", "pacientes_atendidos"].sum().reset_index()
     )
     st.plotly_chart(
         px.line(tdf, x="fecha", y=["pacientes_programados", "pacientes_atendidos"], markers=True, title="Tendencia semanal"),
@@ -1274,7 +1314,12 @@ def ui_dashboard():
         fig2b.update_layout(xaxis_tickangle=-40)
         st.plotly_chart(fig2b, use_container_width=True)
 
-    act_sum = df.groupby("actividad")[ ["pacientes_programados", "pacientes_atendidos"] ].sum().reset_index()
+    if "paciente_priorizado" in df.columns:
+        por_origen = df[df["paciente_priorizado"] == 1].groupby("priorizado_origen")["id"].count().reset_index().rename(columns={"id": "conteo"})
+        if not por_origen.empty:
+            st.plotly_chart(px.bar(por_origen, x="priorizado_origen", y="conteo", title="Prioridades por origen"), use_container_width=True)
+
+    act_sum = df.groupby("actividad")["pacientes_programados", "pacientes_atendidos"].sum().reset_index()
     st.plotly_chart(
         px.bar(act_sum, x="actividad", y=["pacientes_programados", "pacientes_atendidos"], barmode="group", title="Por actividad"),
         use_container_width=True,
@@ -1311,12 +1356,12 @@ def ui_reportes():
     )
     agg_prof["brecha_panacea"] = agg_prof["pacientes_atendidos"] - agg_prof["cargadas_panacea"]
 
-    por_inst = df.groupby("institucion", dropna=True)[["pacientes_programados", "pacientes_atendidos"]].sum().reset_index()
+    por_inst = df.groupby("institucion", dropna=True)["pacientes_programados", "pacientes_atendidos"].sum().reset_index()
     por_geo = (
-        df.groupby(["departamento", "municipio"], dropna=True)[["pacientes_programados", "pacientes_atendidos"]]
+        df.groupby(["departamento", "municipio"], dropna=True)["pacientes_programados", "pacientes_atendidos"]
         .sum().reset_index()
     )
-    por_act = df.groupby("actividad")[ ["pacientes_programados", "pacientes_atendidos"] ].sum().reset_index()
+    por_act = df.groupby("actividad")["pacientes_programados", "pacientes_atendidos"].sum().reset_index()
 
     xls = to_excel_bytes({
         "Detalle": df,
