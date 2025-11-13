@@ -2313,6 +2313,91 @@ def ui_respaldo():
         key="bk_btn_zip",
     )
 
+def _reset_database(method: str):
+    global SQLITE_CONN, DATA
+    try:
+        if method == "vaciar":
+            with SQLITE_CONN:
+                SQLITE_CONN.execute("PRAGMA foreign_keys=OFF;")
+                for t in ["registros","viaticos","agenda","papeleria",
+                          "profesores","pacientes","instituciones","convenios","programas"]:
+                    try:
+                        SQLITE_CONN.execute(f"DELETE FROM {t};")
+                    except Exception:
+                        pass
+                SQLITE_CONN.execute("DELETE FROM sqlite_sequence;")
+                SQLITE_CONN.execute("PRAGMA foreign_keys=ON;")
+            SQLITE_CONN.commit()
+        elif method == "borrar_archivo":
+            try:
+                SQLITE_CONN.close()
+            except Exception:
+                pass
+            import os
+            if os.path.exists(DB_SQLITE_PATH):
+                os.remove(DB_SQLITE_PATH)
+            # Re-abrir y recrear esquema
+            SQLITE_CONN = get_sqlite_conn()
+            ensure_sqlite_schema()
+            DATA = DataAccess(SQLITE_CONN)
+    except Exception as e:
+        st.error(f"Error al reiniciar: {e}")
+        return False
+    return True
+
+def ui_respaldo():
+    st.subheader("Respaldo de la base de datos")
+    st.caption("Descarga la base SQLite actual y/o un ZIP con CSV y schema.sql.")
+
+    col1, col2 = st.columns(2)
+    # Descargar .db
+    if os.path.exists(DB_SQLITE_PATH):
+        col1.download_button(
+            "⬇️ Descargar base (.db)",
+            data=backup_sqlite_file(),
+            file_name=f"respaldo_sqlite_{datetime.now().strftime('%Y%m%d_%H%M')}.db",
+            mime="application/octet-stream",
+            use_container_width=True,
+            key="bk_btn_db",
+        )
+    else:
+        col1.warning("No se encontró el archivo de base de datos actual.")
+
+    # Descargar ZIP
+    col2.download_button(
+        "⬇️ Descargar ZIP (.db + CSV + schema)",
+        data=build_zip_backup(),
+        file_name=f"respaldo_productividad_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+        mime="application/zip",
+        use_container_width=True,
+        key="bk_btn_zip",
+    )
+
+    st.markdown("---")
+    with st.expander("⚠️ Reiniciar base (acción destructiva)", expanded=False):
+        st.warning("Esto borrará información. Haz un respaldo antes.")
+        metodo = st.radio(
+            "Método de reinicio",
+            ["Vaciar tablas (conservar archivo .db)", "Borrar archivo .db (recrear esquema en blanco)"],
+            index=0,
+            horizontal=False,
+            key="reset_metodo",
+        )
+        confirma = st.text_input("Escribe exactamente: BORRAR TODO", key="reset_confirm")
+        colA, colB = st.columns([1, 3])
+        ejecutar = colA.button("Reiniciar ahora", type="primary", use_container_width=True, key="reset_go")
+
+        if ejecutar:
+            if confirma.strip() != "BORRAR TODO":
+                st.error("Confirma escribiendo 'BORRAR TODO' exactamente.")
+            else:
+                m = "vaciar" if metodo.startswith("Vaciar") else "borrar_archivo"
+                ok = _reset_database(m)
+                if ok:
+                    st.success("Base reiniciada correctamente. Recarga la página.")
+                    st.rerun()
+
+
 # ---------------- MAIN ----------------
 def main():
     st.markdown(f"# {APP_ICON} {APP_TITLE}")
@@ -2374,4 +2459,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
