@@ -2461,6 +2461,115 @@ def ui_configuracion():
         st.dataframe(df_prof, use_container_width=True, hide_index=True)
 
         st.markdown("---")
+        st.markdown("#### ✏️ Editar / Eliminar profesional")
+        
+        # Inicializar estado de edición
+        if "editing_prof_id" not in st.session_state:
+            st.session_state.editing_prof_id = None
+        if "editing_prof_data" not in st.session_state:
+            st.session_state.editing_prof_data = {}
+        
+        # Controles para cargar y eliminar
+        p1, p2, p3 = st.columns([1, 1, 1])
+        fid_edit = p1.number_input("ID profesional", min_value=1, step=1, key="cfg_prof_edit_id")
+        cargar_prof = p2.button("📋 Cargar", use_container_width=True, key="cfg_prof_cargar")
+        eliminar_prof = p3.button("🗑️ Eliminar", use_container_width=True, key="cfg_prof_eliminar")
+        
+        # Eliminar
+        if eliminar_prof:
+            try:
+                DATA.delete_profesional(int(fid_edit))
+                success_toast("Profesional desactivado.")
+                st.session_state.editing_prof_id = None
+                st.session_state.editing_prof_data = {}
+                st.rerun()
+            except Exception as e:
+                error_toast(f"Error: {e}")
+        
+        # Cargar datos para edición
+        if cargar_prof:
+            prof_rec = DATA.get_profesional_by_id(int(fid_edit))
+            if not prof_rec:
+                warn_toast("No existe profesional con ese ID.")
+                st.session_state.editing_prof_id = None
+                st.session_state.editing_prof_data = {}
+            else:
+                st.session_state.editing_prof_id = prof_rec["id"]
+                st.session_state.editing_prof_data = {
+                    "nombre": prof_rec["nombre"],
+                    "documento": prof_rec["documento"] or "",
+                    "email": prof_rec["email"] or "",
+                    "zona": prof_rec["zona"] or "(No especifica)"
+                }
+                st.rerun()
+        
+        # Mostrar formulario de edición
+        if st.session_state.editing_prof_id is not None:
+            st.markdown("---")
+            st.success(f"📝 **Editando profesional ID: {st.session_state.editing_prof_id}**")
+            
+            with st.form(key="form_edit_prof", clear_on_submit=False):
+                pe1, pe2, pe3 = st.columns([2, 1, 1])
+                
+                new_nom = pe1.text_input(
+                    "Nombre *", 
+                    value=st.session_state.editing_prof_data["nombre"],
+                    key="form_edit_prof_nom"
+                )
+                new_doc = pe2.text_input(
+                    "Documento", 
+                    value=st.session_state.editing_prof_data["documento"],
+                    key="form_edit_prof_doc"
+                )
+                new_email = pe3.text_input(
+                    "Email", 
+                    value=st.session_state.editing_prof_data["email"],
+                    key="form_edit_prof_email"
+                )
+                
+                zona_opts = ["(No especifica)", "Urbana", "Rural"]
+                current_zona = st.session_state.editing_prof_data["zona"]
+                if current_zona not in zona_opts:
+                    current_zona = "(No especifica)"
+                
+                new_zona = st.selectbox(
+                    "Zona",
+                    options=zona_opts,
+                    index=zona_opts.index(current_zona),
+                    key="form_edit_prof_zona"
+                )
+                
+                col_save, col_cancel = st.columns([1, 1])
+                submit = col_save.form_submit_button("💾 Actualizar", type="primary", use_container_width=True)
+                cancel = col_cancel.form_submit_button("❌ Cancelar", use_container_width=True)
+            
+            if submit:
+                if not new_nom.strip():
+                    error_toast("El nombre es obligatorio")
+                else:
+                    try:
+                        DATA.update_profesional(
+                            st.session_state.editing_prof_id, 
+                            new_nom.strip(), 
+                            new_doc.strip() or None,
+                            new_email.strip() or None,
+                            PROGRAMA_FIJO_ID,
+                            CONVENIO_FIJO_ID,
+                            None if new_zona == "(No especifica)" else new_zona
+                        )
+                        success_toast("✅ Profesional actualizado correctamente")
+                        st.session_state.editing_prof_id = None
+                        st.session_state.editing_prof_data = {}
+                        st.rerun()
+                    except Exception as e:
+                        error_toast(f"Error al actualizar: {e}")
+            
+            if cancel:
+                st.session_state.editing_prof_id = None
+                st.session_state.editing_prof_data = {}
+                st.rerun()
+
+        st.markdown("---")
         st.markdown("### Carga masiva de profesionales")
         st.caption("Columnas: **nombre** (obligatoria), opcionales: documento, email, zona (Rural/Urbana).")
         file_prof = st.file_uploader("Archivo de profesionales", type=["xlsx", "xls", "csv"], key="cfg_up_profesionales")
@@ -2539,6 +2648,168 @@ def ui_configuracion():
         st.markdown("#### Pacientes existentes")
         df_pac = DATA.list_pacientes()
         st.dataframe(df_pac, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.markdown("#### ✏️ Editar / Eliminar paciente")
+        
+        # Inicializar estado de edición
+        if "editing_pac_id" not in st.session_state:
+            st.session_state.editing_pac_id = None
+        if "editing_pac_data" not in st.session_state:
+            st.session_state.editing_pac_data = {}
+        
+        # Controles para cargar y eliminar
+        pa1, pa2, pa3 = st.columns([1, 1, 1])
+        pac_id_edit = pa1.number_input("ID paciente", min_value=1, step=1, key="cfg_pac_edit_id")
+        cargar_pac = pa2.button("📋 Cargar", use_container_width=True, key="cfg_pac_cargar")
+        eliminar_pac = pa3.button("🗑️ Eliminar", use_container_width=True, key="cfg_pac_eliminar")
+        
+        # Eliminar
+        if eliminar_pac:
+            try:
+                DATA.delete_paciente(int(pac_id_edit))
+                success_toast("Paciente desactivado.")
+                st.session_state.editing_pac_id = None
+                st.session_state.editing_pac_data = {}
+                st.rerun()
+            except Exception as e:
+                error_toast(f"Error: {e}")
+        
+        # Cargar datos para edición
+        if cargar_pac:
+            pac_rec = DATA.get_paciente_by_id(int(pac_id_edit))
+            if not pac_rec:
+                warn_toast("No existe paciente con ese ID.")
+                st.session_state.editing_pac_id = None
+                st.session_state.editing_pac_data = {}
+            else:
+                st.session_state.editing_pac_id = pac_rec["id"]
+                st.session_state.editing_pac_data = {
+                    "numero_documento": pac_rec["numero_documento"],
+                    "nombre": pac_rec["nombre"],
+                    "fecha_nacimiento": pac_rec["fecha_nacimiento"] or "",
+                    "sexo": pac_rec["sexo"] if pac_rec["sexo"] in ["F", "M", "Otro"] else "(No especifica)",
+                    "telefono": pac_rec["telefono"] or "",
+                    "email": pac_rec["email"] or "",
+                    "direccion": pac_rec["direccion"] or "",
+                    "localidad": pac_rec["localidad"] or "",
+                    "municipio": pac_rec["municipio"] or "",
+                    "departamento": pac_rec["departamento"] or "",
+                    "zona": pac_rec["zona"] if pac_rec["zona"] in ["Urbana", "Rural"] else "(No especifica)"
+                }
+                st.rerun()
+        
+        # Mostrar formulario de edición
+        if st.session_state.editing_pac_id is not None:
+            st.markdown("---")
+            st.success(f"📝 **Editando paciente ID: {st.session_state.editing_pac_id}**")
+            
+            with st.form(key="form_edit_pac", clear_on_submit=False):
+                pae1, pae2 = st.columns([1, 2])
+                new_doc = pae1.text_input(
+                    "Documento *", 
+                    value=st.session_state.editing_pac_data["numero_documento"],
+                    key="form_edit_pac_doc"
+                )
+                new_nom = pae2.text_input(
+                    "Nombre *", 
+                    value=st.session_state.editing_pac_data["nombre"],
+                    key="form_edit_pac_nom"
+                )
+                
+                pae3, pae4, pae5 = st.columns([1, 1, 1])
+                new_fnac = pae3.text_input(
+                    "Fecha nacimiento", 
+                    value=st.session_state.editing_pac_data["fecha_nacimiento"],
+                    key="form_edit_pac_fnac"
+                )
+                
+                sexo_opts = ["(No especifica)", "F", "M", "Otro"]
+                current_sexo = st.session_state.editing_pac_data["sexo"]
+                new_sexo = pae4.selectbox(
+                    "Sexo",
+                    options=sexo_opts,
+                    index=sexo_opts.index(current_sexo),
+                    key="form_edit_pac_sexo"
+                )
+                
+                new_tel = pae5.text_input(
+                    "Teléfono", 
+                    value=st.session_state.editing_pac_data["telefono"],
+                    key="form_edit_pac_tel"
+                )
+                
+                pae6, pae7 = st.columns([1, 1])
+                new_email = pae6.text_input(
+                    "Email", 
+                    value=st.session_state.editing_pac_data["email"],
+                    key="form_edit_pac_email"
+                )
+                new_dir = pae7.text_input(
+                    "Dirección", 
+                    value=st.session_state.editing_pac_data["direccion"],
+                    key="form_edit_pac_dir"
+                )
+                
+                pae8, pae9, pae10 = st.columns([1, 1, 1])
+                new_loc = pae8.text_input(
+                    "Localidad", 
+                    value=st.session_state.editing_pac_data["localidad"],
+                    key="form_edit_pac_loc"
+                )
+                new_mun = pae9.text_input(
+                    "Municipio", 
+                    value=st.session_state.editing_pac_data["municipio"],
+                    key="form_edit_pac_mun"
+                )
+                new_dep = pae10.text_input(
+                    "Departamento", 
+                    value=st.session_state.editing_pac_data["departamento"],
+                    key="form_edit_pac_dep"
+                )
+                
+                zona_opts = ["(No especifica)", "Urbana", "Rural"]
+                current_zona = st.session_state.editing_pac_data["zona"]
+                new_zona = st.selectbox(
+                    "Zona",
+                    options=zona_opts,
+                    index=zona_opts.index(current_zona),
+                    key="form_edit_pac_zona"
+                )
+                
+                col_save, col_cancel = st.columns([1, 1])
+                submit = col_save.form_submit_button("💾 Actualizar", type="primary", use_container_width=True)
+                cancel = col_cancel.form_submit_button("❌ Cancelar", use_container_width=True)
+            
+            if submit:
+                if not new_doc.strip() or not new_nom.strip():
+                    error_toast("Documento y nombre son obligatorios")
+                else:
+                    try:
+                        DATA.upsert_paciente(
+                            numero_documento=new_doc.strip(),
+                            nombre=new_nom.strip(),
+                            fecha_nacimiento=new_fnac.strip() or None,
+                            sexo=None if new_sexo == "(No especifica)" else new_sexo,
+                            telefono=new_tel.strip() or None,
+                            email=new_email.strip() or None,
+                            direccion=new_dir.strip() or None,
+                            localidad=new_loc.strip() or None,
+                            municipio=new_mun.strip() or None,
+                            departamento=new_dep.strip() or None,
+                            zona=None if new_zona == "(No especifica)" else new_zona
+                        )
+                        success_toast("✅ Paciente actualizado correctamente")
+                        st.session_state.editing_pac_id = None
+                        st.session_state.editing_pac_data = {}
+                        st.rerun()
+                    except Exception as e:
+                        error_toast(f"Error al actualizar: {e}")
+            
+            if cancel:
+                st.session_state.editing_pac_id = None
+                st.session_state.editing_pac_data = {}
+                st.rerun()
 
         st.markdown("---")
         st.markdown("### Carga masiva de pacientes")
