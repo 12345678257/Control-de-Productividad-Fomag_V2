@@ -13,7 +13,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-APP_TITLE = "Productividad de Profesionales"
+APP_TITLE = "Productividad de Profesionales - FOMAG"
 APP_ICON = "📊"
 DB_SQLITE_PATH = "productividad_Profesionales.db"
 
@@ -3010,3 +3010,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
