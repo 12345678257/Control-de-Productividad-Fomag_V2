@@ -2126,7 +2126,7 @@ def ui_planificador(auth_user: Optional[str]):
                 except Exception as e:
                     error_toast(f"No se pudo actualizar: {e}")
 
-# ---------------- UI: PAPELERIA (MEJORADO) ----------------
+# ---------------- UI: PAPELERIA (CORREGIDO) ----------------
 def ui_papeleria(auth_user: Optional[str]):
     st.subheader("Solicitud de papelería")
 
@@ -2237,8 +2237,9 @@ def ui_papeleria(auth_user: Optional[str]):
                     success_toast("Solicitud actualizada.")
                     st.rerun()
                 except Exception as e:
-                    error_toast(f"No se pudo actua# ---------------- UI: CONFIGURACION (SECCIÓN INSTITUCIONES CORREGIDA) ----------------
-# ---------------- UI: CONFIGURACION COMPLETA ----------------
+                    error_toast(f"No se pudo actualizar: {e}")
+
+# ---------------- UI: CONFIGURACION (SECCIÓN INSTITUCIONES CORREGIDA) ----------------
 def ui_configuracion():
     st.subheader("Configuración de catálogos")
     tabs = st.tabs(["Programas", "Convenios", "Instituciones", "Profesionales", "Pacientes"])
@@ -2432,6 +2433,12 @@ def ui_configuracion():
         progs = DATA.list_programas()
         prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
 
+        # Necesitamos un programa y convenio fijos para profesionales
+        # Por simplicidad, tomamos el primero disponible
+        PROGRAMA_FIJO_ID = list(prog_map.values())[0] if prog_map else None
+        conv_fijos = DATA.list_convenios(PROGRAMA_FIJO_ID) if PROGRAMA_FIJO_ID else pd.DataFrame()
+        CONVENIO_FIJO_ID = int(conv_fijos.iloc[0]["id"]) if not conv_fijos.empty else None
+
         c1, c2, c3 = st.columns([2, 1.2, 1.4])
         f_nom = c1.text_input("Nombre profesional", key="cfg_prof_nombre")
         f_doc = c2.text_input("Documento (opcional)", key="cfg_prof_doc")
@@ -2589,7 +2596,7 @@ def ui_configuracion():
                     st.rerun()
             except Exception as e:
                 st.error(f"Error procesando pacientes: {e}")
-                    
+
 # ---------------- UI: RESPALDO ----------------
 def ui_respaldo():
     st.subheader("Respaldo de la base de datos")
@@ -2732,5 +2739,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
