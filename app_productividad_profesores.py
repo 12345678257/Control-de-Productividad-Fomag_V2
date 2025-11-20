@@ -259,10 +259,10 @@ SQLITE_DDL = {
         nombre_paciente TEXT,
         actividad TEXT,
         atendido INTEGER,
-        registrado_panacea INTEGER,           -- atención registrada (NO el paciente)
-        paciente_creado_panacea INTEGER,      -- paciente creado en Panacea
-        paciente_priorizado INTEGER,          -- ⬅️ NUEVO
-        priorizado_origen TEXT,               -- ⬅️ NUEVO
+        registrado_panacea INTEGER,
+        paciente_creado_panacea INTEGER,
+        paciente_priorizado INTEGER,
+        priorizado_origen TEXT,
         duracion_minutos INTEGER,
         tipo_contacto TEXT,
         pacientes_programados INTEGER NOT NULL,
@@ -358,8 +358,8 @@ def ensure_sqlite_schema():
             "atendido": "ALTER TABLE registros ADD COLUMN atendido INTEGER;",
             "registrado_panacea": "ALTER TABLE registros ADD COLUMN registrado_panacea INTEGER;",
             "paciente_creado_panacea": "ALTER TABLE registros ADD COLUMN paciente_creado_panacea INTEGER;",
-            "paciente_priorizado": "ALTER TABLE registros ADD COLUMN paciente_priorizado INTEGER;",   # NUEVO
-            "priorizado_origen": "ALTER TABLE registros ADD COLUMN priorizado_origen TEXT;",         # NUEVO
+            "paciente_priorizado": "ALTER TABLE registros ADD COLUMN paciente_priorizado INTEGER;",
+            "priorizado_origen": "ALTER TABLE registros ADD COLUMN priorizado_origen TEXT;",
             "duracion_minutos": "ALTER TABLE registros ADD COLUMN duracion_minutos INTEGER;",
             "tipo_contacto": "ALTER TABLE registros ADD COLUMN tipo_contacto TEXT;",
             "paciente_id": "ALTER TABLE registros ADD COLUMN paciente_id INTEGER;",
@@ -420,7 +420,7 @@ class DataAccess:
         ).fetchone()
         return int(r["id"]) if r else None
 
-    # CRUD básicos
+    # CRUD PROGRAMAS
     def list_programas(self) -> pd.DataFrame:
         return pd.read_sql_query("SELECT * FROM programas WHERE activo=1 ORDER BY nombre", self.db)
 
@@ -432,6 +432,19 @@ class DataAccess:
         r = self.db.execute("SELECT id FROM programas WHERE nombre=?", (nombre.strip(),)).fetchone()
         return int(r["id"])
 
+    def get_programa_by_id(self, pid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM programas WHERE id=?", (pid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_programa(self, pid: int, nombre: str) -> None:
+        with self.db:
+            self.db.execute("UPDATE programas SET nombre=? WHERE id=?", (nombre.strip(), pid))
+
+    def delete_programa(self, pid: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE programas SET activo=0 WHERE id=?", (pid,))
+
+    # CRUD CONVENIOS
     def list_convenios(self, programa_id: Optional[int] = None) -> pd.DataFrame:
         q = "SELECT * FROM convenios WHERE activo=1"
         p: List[Any] = []
@@ -454,6 +467,19 @@ class DataAccess:
         ).fetchone()
         return int(r["id"])
 
+    def get_convenio_by_id(self, cid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM convenios WHERE id=?", (cid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_convenio(self, cid: int, nombre: str, programa_id: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE convenios SET nombre=?, programa_id=? WHERE id=?", (nombre.strip(), programa_id, cid))
+
+    def delete_convenio(self, cid: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE convenios SET activo=0 WHERE id=?", (cid,))
+
+    # CRUD INSTITUCIONES
     def list_instituciones(self) -> pd.DataFrame:
         return pd.read_sql_query(
             "SELECT * FROM instituciones WHERE activo=1 ORDER BY departamento, municipio, nombre", self.db
@@ -474,6 +500,22 @@ class DataAccess:
         ).fetchone()
         return int(r["id"])
 
+    def get_institucion_by_id(self, iid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM instituciones WHERE id=?", (iid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_institucion(self, iid: int, nombre: str, localidad: Optional[str], municipio: Optional[str], departamento: Optional[str]) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE instituciones SET nombre=?, localidad=?, municipio=?, departamento=? WHERE id=?",
+                (nombre.strip(), localidad, municipio, departamento, iid)
+            )
+
+    def delete_institucion(self, iid: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE instituciones SET activo=0 WHERE id=?", (iid,))
+
+    # CRUD PROFESIONALES
     def list_Profesionales(
         self, programa_id: Optional[int] = None, convenio_id: Optional[int] = None
     ) -> pd.DataFrame:
@@ -509,6 +551,23 @@ class DataAccess:
         ).fetchone()
         return int(r["id"])
 
+    def get_profesional_by_id(self, fid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM Profesionales WHERE id=?", (fid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_profesional(self, fid: int, nombre: str, documento: Optional[str], email: Optional[str], 
+                          programa_id: Optional[int], convenio_id: Optional[int], zona: Optional[str]) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE Profesionales SET nombre=?, documento=?, email=?, programa_id=?, convenio_id=?, zona=? WHERE id=?",
+                (nombre.strip(), documento, email, programa_id, convenio_id, zona, fid)
+            )
+
+    def delete_profesional(self, fid: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE Profesionales SET activo=0 WHERE id=?", (fid,))
+
+    # CRUD PACIENTES
     def list_pacientes(self) -> pd.DataFrame:
         return pd.read_sql_query("SELECT * FROM pacientes WHERE activo=1 ORDER BY nombre", self.db)
 
@@ -518,6 +577,10 @@ class DataAccess:
             return None
         row = self.db.execute("SELECT * FROM pacientes WHERE numero_documento=? AND activo=1", (doc,)).fetchone()
         return dict(row) if row else None
+
+    def get_paciente_by_id(self, pid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM pacientes WHERE id=?", (pid,)).fetchone()
+        return dict(r) if r else None
 
     def upsert_paciente(
         self,
@@ -583,6 +646,11 @@ class DataAccess:
             )
         return int(cur.lastrowid)
 
+    def delete_paciente(self, pid: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE pacientes SET activo=0 WHERE id=?", (pid,))
+
+    # CRUD REGISTROS
     def insert_registro(
         self,
         fecha: date,
@@ -621,9 +689,9 @@ class DataAccess:
             "nombre_paciente": (nombre_paciente or "").strip() or None,
             "actividad": actividad,
             "atendido": 1 if atendido else 0,
-            "registrado_panacea": 1 if registrado_panacea else 0,          # atención
-            "paciente_creado_panacea": 1 if paciente_creado_panacea else 0, # paciente
-            "paciente_priorizado": 1 if paciente_priorizado else 0,         # ⬅️ nuevo
+            "registrado_panacea": 1 if registrado_panacea else 0,
+            "paciente_creado_panacea": 1 if paciente_creado_panacea else 0,
+            "paciente_priorizado": 1 if paciente_priorizado else 0,
             "priorizado_origen": priorizado_origen,
             "duracion_minutos": int(duracion_minutos) if duracion_minutos is not None else None,
             "tipo_contacto": tipo_contacto,
@@ -689,7 +757,7 @@ class DataAccess:
         with self.db:
             self.db.execute(f"UPDATE registros SET {sets} WHERE id=?", (*updates.values(), rid))
 
-    # Viáticos
+    # CRUD VIATICOS
     def insert_viatico(
         self,
         fecha: date,
@@ -749,11 +817,22 @@ class DataAccess:
         q += " ORDER BY v.fecha DESC, v.id DESC"
         return pd.read_sql_query(q, self.db, params=params)
 
+    def get_viatico_by_id(self, vid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM viaticos WHERE id=?", (vid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_viatico(self, vid: int, updates: Dict[str, Any]) -> None:
+        updates = dict(updates)
+        updates["actualizado_en"] = _now()
+        sets = ",".join([f"{k}=?" for k in updates.keys()])
+        with self.db:
+            self.db.execute(f"UPDATE viaticos SET {sets} WHERE id=?", (*updates.values(), vid))
+
     def delete_viatico(self, vid: int) -> None:
         with self.db:
             self.db.execute("DELETE FROM viaticos WHERE id=?", (vid,))
 
-    # Agenda
+    # CRUD AGENDA
     def insert_agenda_event(
         self,
         fecha: date,
@@ -826,7 +905,7 @@ class DataAccess:
         with self.db:
             self.db.execute("DELETE FROM agenda WHERE id=?", (eid,))
 
-    # Papelería
+    # CRUD PAPELERIA
     def insert_papeleria(
         self,
         fecha: date,
@@ -1022,10 +1101,10 @@ def plantilla_atenciones_df() -> pd.DataFrame:
         "nombre",
         "actividad",
         "atendido",
-        "registrado_panacea",        # atención registrada
-        "paciente_creado_panacea",   # paciente creado en Panacea
-        "paciente_priorizado",       # ⬅️ nuevo
-        "priorizado_origen",         # ⬅️ nuevo (si está priorizado)
+        "registrado_panacea",
+        "paciente_creado_panacea",
+        "paciente_priorizado",
+        "priorizado_origen",
         "tipo_contacto",
         "duracion_minutos",
         "observaciones",
@@ -1050,12 +1129,6 @@ def parse_fecha(value) -> str:
         return date.today().strftime("%Y-%m-%d")
 
 def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, List[str]]:
-    """
-    Columnas mínimas: fecha, programa, convenio, institucion, profesional, documento, nombre, actividad
-    Opcionales: departamento, municipio, localidad, atendido, registrado_panacea, paciente_creado_panacea,
-                paciente_priorizado, priorizado_origen, tipo_contacto, duracion_minutos, observaciones,
-                sexo, fecha_nacimiento, telefono, email, direccion, zona
-    """
     df = normalize_columns(df.copy())
     req = {"fecha", "programa", "convenio", "institucion", "profesional", "documento", "nombre", "actividad"}
     missing = req - set(df.columns)
@@ -1066,11 +1139,7 @@ def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, L
     errores: List[str] = []
     for idx, r in df.iterrows():
         try:
-            # Fecha
-            f_raw = r.get("fecha")
-            fecha = parse_fecha(f_raw)
-
-            # Programa y convenio (auto-upsert)
+            fecha = parse_fecha(r.get("fecha"))
             p_name = str(r.get("programa") or "").strip()
             c_name = str(r.get("convenio") or "").strip()
             if not p_name or not c_name:
@@ -1078,7 +1147,6 @@ def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, L
             pid = DATA.programa_id_by_name(p_name) or DATA.upsert_programa(p_name)
             cid = DATA.convenio_id_by_name(c_name, pid) or DATA.upsert_convenio(c_name, pid)
 
-            # Institución (auto-upsert con geo si viene)
             i_name = str(r.get("institucion") or "").strip()
             dep = str(r.get("departamento") or "").strip() or None
             mun = str(r.get("municipio") or "").strip() or None
@@ -1091,13 +1159,11 @@ def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, L
             municipio_val = inst_row["municipio"]
             departamento_val = inst_row["departamento"]
 
-            # Profesional (auto-upsert)
             f_name = str(r.get("profesional") or "").strip()
             if not f_name:
                 raise ValueError("Profesional es obligatorio")
             fid = DATA.Profesional_id_by_name(f_name, pid, cid) or DATA.upsert_Profesional(f_name, None, None, pid, cid, None)
 
-            # Paciente (upsert)
             doc = str(r.get("documento") or "").strip()
             nom = str(r.get("nombre") or "").strip()
             if not doc or not nom:
@@ -1116,11 +1182,9 @@ def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, L
                 zona=str(r.get("zona")).strip() if pd.notna(r.get("zona")) else None,
             )
 
-            # Campos de la atención
             actividad = str(r.get("actividad") or "").strip() or ACTIVIDADES_PLANTILLAS[0]
             atendido = bool(str2bool(r.get("atendido")))
 
-            # atención registrada en Panacea (NO el paciente)
             reg_field_att = next(
                 (
                     c
@@ -1136,7 +1200,6 @@ def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, L
             )
             registrado_panacea = bool(str2bool(r.get(reg_field_att))) if reg_field_att else False
 
-            # paciente creado en Panacea
             reg_field_pac = next(
                 (
                     c
@@ -1152,7 +1215,6 @@ def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, L
             )
             paciente_creado_panacea = bool(str2bool(r.get(reg_field_pac))) if reg_field_pac else False
 
-            # priorizado
             paciente_priorizado = bool(str2bool(r.get("paciente_priorizado"))) if "paciente_priorizado" in df.columns else False
             priorizado_origen = None
             if paciente_priorizado:
@@ -1165,7 +1227,6 @@ def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, L
                 tipo_contacto = None
             duracion = safe_int(r.get("duracion_minutos"))
 
-            # Insert
             DATA.insert_registro(
                 fecha=fecha,
                 programa_id=pid,
@@ -1201,7 +1262,6 @@ def ui_cargar_datos(auth_user: Optional[str]):
     def K(x: str) -> str:
         return f"reg_{x}"
 
-    # Estado para autocompletado
     defaults = {
         K("pac_nombre"): "",
         K("pac_fecha_nac"): "",
@@ -1216,14 +1276,13 @@ def ui_cargar_datos(auth_user: Optional[str]):
         K("pac_id_actual"): None,
         K("pac_doc"): "",
         K("pac_creado_panacea"): False,
-        K("pac_priorizado"): False,          # ⬅️ nuevo
-        K("priorizado_origen"): "(Seleccione)",  # ⬅️ nuevo
+        K("pac_priorizado"): False,
+        K("priorizado_origen"): "(Seleccione)",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # Selección programa/convenio/profesional
     c1, c2 = st.columns([1.4, 1.4])
     progs = DATA.list_programas()
     prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
@@ -1240,7 +1299,6 @@ def ui_cargar_datos(auth_user: Optional[str]):
     fsel = c2.selectbox("Profesional", options=list(prof_map.keys()) if prof_map else [], key=K("form_profesional"))
     fid = prof_map.get(fsel)
 
-    # Ubicación e institución
     instituciones = DATA.list_instituciones()
     institucion_id = None
     localidad_val = municipio_val = departamento_val = None
@@ -1272,12 +1330,10 @@ def ui_cargar_datos(auth_user: Optional[str]):
             municipio_val = row.get("municipio")
             departamento_val = row.get("departamento")
 
-    # Fecha y actividad
     c3, c4 = st.columns([1, 1])
     fecha = c3.date_input("Fecha de la atención", value=date.today(), key=K("fecha"))
     actividad = c4.selectbox("Actividad / plantilla", ACTIVIDADES_PLANTILLAS, key=K("actividad"))
 
-    # ---------------- AUTORELLENO PACIENTE ----------------
     st.markdown("#### Datos del paciente")
     p1, p2 = st.columns([1, 1])
     p1.text_input("Documento del paciente (cédula)", key=K("pac_doc"))
@@ -1329,22 +1385,18 @@ def ui_cargar_datos(auth_user: Optional[str]):
     st.session_state.setdefault(K("pac_zona"), "(No especifica)")
     zcol.selectbox("Zona (Rural/Urbana)", options=zona_opts, key=K("pac_zona"))
 
-    # ----- NUEVOS CHECKS -----
-    zcol2.checkbox("Paciente creado en Panacea", key=K("pac_creado_panacea"))  # paciente
+    zcol2.checkbox("Paciente creado en Panacea", key=K("pac_creado_panacea"))
     c9, c10 = st.columns([1, 1])
     c9.radio("¿Atendido?", ["No", "Sí"], index=1, horizontal=True, key=K("atendido"))
-    c10.checkbox("Atención registrada en Panacea", key=K("reg_panacea"))       # atención
+    c10.checkbox("Atención registrada en Panacea", key=K("reg_panacea"))
 
-    # Prioridad condicional
     pr1, pr2 = st.columns([1, 1])
     pr1.checkbox("Paciente priorizado", key=K("pac_priorizado"))
     show_origen = st.session_state.get(K("pac_priorizado"), False)
     if show_origen:
-        # Si está priorizado, mostramos el origen
         current = st.session_state.get(K("priorizado_origen")) or "(Seleccione)"
         pr2.selectbox("Origen priorización", options=["(Seleccione)"] + PRIORI_ORIGEN_OPTS, key=K("priorizado_origen"))
     else:
-        # Limpiamos origen si se desmarca
         st.session_state[K("priorizado_origen")] = "(Seleccione)"
 
     c11, c12 = st.columns([1, 1])
@@ -1353,7 +1405,6 @@ def ui_cargar_datos(auth_user: Optional[str]):
 
     observaciones = st.text_area("Observaciones", key=K("observaciones"))
 
-    # Guardar atención (manual)
     clicked = st.button("Guardar atención", type="primary", use_container_width=True, key=K("btn_guardar_atencion"))
     if clicked:
         faltantes = []
@@ -1419,8 +1470,8 @@ def ui_cargar_datos(auth_user: Optional[str]):
                     nombre_paciente=(st.session_state[K("pac_nombre")] or "").strip(),
                     actividad=st.session_state[K("actividad")],
                     atendido=True if st.session_state[K("atendido")] == "Sí" else False,
-                    registrado_panacea=bool(st.session_state[K("reg_panacea")]),          # atención
-                    paciente_creado_panacea=bool(st.session_state[K("pac_creado_panacea")]),  # paciente
+                    registrado_panacea=bool(st.session_state[K("reg_panacea")]),
+                    paciente_creado_panacea=bool(st.session_state[K("pac_creado_panacea")]),
                     paciente_priorizado=priorizado,
                     priorizado_origen=priorizado_origen,
                     duracion_minutos=dur_val,
@@ -1517,8 +1568,8 @@ def ui_registros():
         "atendido",
         "paciente_creado_panacea",
         "registrado_panacea",
-        "paciente_priorizado",  # ⬅️ nuevo visible
-        "priorizado_origen",    # ⬅️ nuevo visible
+        "paciente_priorizado",
+        "priorizado_origen",
         "pacientes_programados",
         "pacientes_atendidos",
         "no_asistieron",
@@ -1550,52 +1601,65 @@ def ui_dashboard():
         return
 
     df["fecha"] = pd.to_datetime(df["fecha"])
-    total_prog = int(df["pacientes_programados"].sum())
-    total_att = int(df["pacientes_atendidos"].sum())
-    total_no = int(df["no_asistieron"].sum())
+    
+    # CORREGIDO: Contamos registros únicos donde atendido=1
+    total_prog = int(df.shape[0])  # Total de registros
+    total_att = int(df[df["atendido"] == 1].shape[0])  # Registros con atendido=1
+    total_no = total_prog - total_att
     tasa = (total_att / total_prog * 100) if total_prog else 0.0
+    
     total_min = int(df.get("duracion_minutos", pd.Series()).fillna(0).sum()) if "duracion_minutos" in df.columns else 0
     n_con = int(df.get("duracion_minutos", pd.Series()).notna().sum()) if "duracion_minutos" in df.columns else 0
     prom = (total_min / n_con) if n_con else 0.0
     horas = total_min / 60 if total_min > 0 else 0.0
     prod_ph = (total_att / horas) if horas > 0 else 0.0
-    total_pan = int(df.get("registrado_panacea", pd.Series()).fillna(0).sum()) if "registrado_panacea" in df.columns else 0
-    total_pac_creados = int(df.get("paciente_creado_panacea", pd.Series()).fillna(0).sum()) if "paciente_creado_panacea" in df.columns else 0
-    total_priorizados = int(df.get("paciente_priorizado", pd.Series()).fillna(0).sum()) if "paciente_priorizado" in df.columns else 0
+    
+    total_pan = int(df[df.get("registrado_panacea", 0) == 1].shape[0]) if "registrado_panacea" in df.columns else 0
+    total_pac_creados = int(df[df.get("paciente_creado_panacea", 0) == 1].shape[0]) if "paciente_creado_panacea" in df.columns else 0
+    total_priorizados = int(df[df.get("paciente_priorizado", 0) == 1].shape[0]) if "paciente_priorizado" in df.columns else 0
     brecha = total_att - total_pan
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Programados", f"{total_prog:,}".replace(",", "."))
+    k1.metric("Total registros", f"{total_prog:,}".replace(",", "."))
     k2.metric("Atendidos", f"{total_att:,}".replace(",", "."))
     k3.metric("No asistieron", f"{total_no:,}".replace(",", "."))
     k4.metric("Tasa atención", f"{tasa:.1f}%")
 
     k5, k6, k7, k8 = st.columns(4)
-    k5.metric("Minutos", f"{total_min:,}".replace(",", "."))
+    k5.metric("Minutos totales", f"{total_min:,}".replace(",", "."))
     k6.metric("Duración prom (min)", f"{prom:.1f}")
     k7.metric("Atenciones/hora", f"{prod_ph:.2f}")
     k8.metric("Atención en Panacea / brecha", f"{total_pan} / {brecha}")
 
     k9, k10 = st.columns([1, 1])
-    k9.metric("Pacientes CRE. Panacea (registros)", f"{total_pac_creados:,}".replace(",", "."))
+    k9.metric("Pacientes creados Panacea", f"{total_pac_creados:,}".replace(",", "."))
     k10.metric("Pacientes priorizados", f"{total_priorizados:,}".replace(",", "."))
 
-    # Tendencia semanal
-    tdf = df.groupby(pd.Grouper(key="fecha", freq="W"))[["pacientes_programados", "pacientes_atendidos"]].sum().reset_index()
+    # Tendencia semanal - CORREGIDA
+    tdf = df.copy()
+    tdf["atendido_num"] = df["atendido"].apply(lambda x: 1 if x == 1 else 0)
+    tdf_agg = tdf.groupby(pd.Grouper(key="fecha", freq="W")).agg({
+        "id": "count",  # Total programados
+        "atendido_num": "sum"  # Total atendidos
+    }).reset_index()
+    tdf_agg.columns = ["fecha", "pacientes_programados", "pacientes_atendidos"]
+    
     st.plotly_chart(
-        px.line(tdf, x="fecha", y=["pacientes_programados", "pacientes_atendidos"], markers=True, title="Tendencia semanal"),
+        px.line(tdf_agg, x="fecha", y=["pacientes_programados", "pacientes_atendidos"], 
+                markers=True, title="Tendencia semanal"),
         use_container_width=True,
     )
 
-    # Ranking profesional
+    # Ranking profesional - CORREGIDO
     rank = (
-        df.groupby("Profesional", dropna=True)["pacientes_atendidos"]
-        .sum()
+        df[df["atendido"] == 1]
+        .groupby("Profesional", dropna=True)
+        .size()
         .sort_values(ascending=False)
         .head(15)
-        .reset_index()
+        .reset_index(name="pacientes_atendidos")
     )
-    fig2 = px.bar(rank, x="Profesional", y="pacientes_atendidos", title="Top profesionales")
+    fig2 = px.bar(rank, x="Profesional", y="pacientes_atendidos", title="Top profesionales (atendidos)")
     fig2.update_layout(xaxis_tickangle=-40)
     st.plotly_chart(fig2, use_container_width=True)
 
@@ -1604,8 +1668,8 @@ def ui_dashboard():
         pan = (
             df.groupby("Profesional", dropna=True)
             .agg(
-                pacientes_atendidos=("pacientes_atendidos", "sum"),
-                cargadas_panacea=("registrado_panacea", "sum"),
+                pacientes_atendidos=("atendido", lambda x: (x == 1).sum()),
+                cargadas_panacea=("registrado_panacea", lambda x: (x == 1).sum()),
             )
             .reset_index()
         )
@@ -1623,21 +1687,25 @@ def ui_dashboard():
     # Prioridad: distribución por origen
     if "paciente_priorizado" in df.columns:
         dist = (
-            df.assign(
-                priorizado=df["paciente_priorizado"].fillna(0).astype(int),
-                prior_origen=df["priorizado_origen"].fillna("(Sin origen)"),
-            )
-            .groupby("prior_origen")["priorizado"]
-            .sum()
-            .reset_index()
+            df[df["paciente_priorizado"] == 1]
+            .assign(prior_origen=df["priorizado_origen"].fillna("(Sin origen)"))
+            .groupby("prior_origen")
+            .size()
+            .reset_index(name="priorizado")
             .sort_values("priorizado", ascending=False)
         )
-        figp = px.bar(dist, x="prior_origen", y="priorizado", title="Pacientes priorizados por origen")
-        figp.update_layout(xaxis_tickangle=-35)
-        st.plotly_chart(figp, use_container_width=True)
+        if not dist.empty:
+            figp = px.bar(dist, x="prior_origen", y="priorizado", title="Pacientes priorizados por origen")
+            figp.update_layout(xaxis_tickangle=-35)
+            st.plotly_chart(figp, use_container_width=True)
 
-    # Por actividad
-    act_sum = df.groupby("actividad")[["pacientes_programados", "pacientes_atendidos"]].sum().reset_index()
+    # Por actividad - CORREGIDO
+    act_sum = df.groupby("actividad").agg({
+        "id": "count",
+        "atendido": lambda x: (x == 1).sum()
+    }).reset_index()
+    act_sum.columns = ["actividad", "pacientes_programados", "pacientes_atendidos"]
+    
     st.plotly_chart(
         px.bar(
             act_sum,
@@ -1649,7 +1717,7 @@ def ui_dashboard():
         use_container_width=True,
     )
 
-# ---------------- UI: REPORTES ----------------
+# ---------------- UI: REPORTES (MEJORADO) ----------------
 def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as w:
@@ -1661,72 +1729,158 @@ def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
 
 def ui_reportes():
     st.subheader("Reportes y descargas")
+    
+    # ATENCIONES
     df = DATA.list_registros(st.session_state.filters)
-    if df.empty:
-        st.info("Sin registros para descargar.")
+    
+    # VIÁTICOS  
+    df_viaticos = DATA.list_viaticos(st.session_state.filters)
+    
+    # AGENDA
+    df_agenda = DATA.list_agenda(st.session_state.filters)
+    
+    # PAPELERÍA
+    df_papeleria = DATA.list_papeleria(st.session_state.filters)
+    
+    if df.empty and df_viaticos.empty and df_agenda.empty and df_papeleria.empty:
+        st.info("Sin registros para descargar en el período seleccionado.")
         return
 
-    agg_prof = (
-        df.groupby("Profesional", dropna=True)
-        .agg(
-            pacientes_programados=("pacientes_programados", "sum"),
-            pacientes_atendidos=("pacientes_atendidos", "sum"),
-            cargadas_panacea=("registrado_panacea", "sum"),
-            pac_creados_panacea=("paciente_creado_panacea", "sum"),
-            priorizados=("paciente_priorizado", "sum"),
-            minutos=("duracion_minutos", "sum"),
+    # Agregados de atenciones
+    sheets = {}
+    
+    if not df.empty:
+        agg_prof = (
+            df.groupby("Profesional", dropna=True)
+            .agg(
+                registros_totales=("id", "count"),
+                pacientes_atendidos=("atendido", lambda x: (x == 1).sum()),
+                cargadas_panacea=("registrado_panacea", lambda x: (x == 1).sum()),
+                pac_creados_panacea=("paciente_creado_panacea", lambda x: (x == 1).sum()),
+                priorizados=("paciente_priorizado", lambda x: (x == 1).sum()),
+                minutos=("duracion_minutos", "sum"),
+            )
+            .reset_index()
         )
-        .reset_index()
-    )
-    agg_prof["tasa_atencion"] = np.where(
-        agg_prof["pacientes_programados"] > 0,
-        agg_prof["pacientes_atendidos"] / agg_prof["pacientes_programados"],
-        np.nan,
-    )
-    agg_prof["brecha_panacea"] = agg_prof["pacientes_atendidos"] - agg_prof["cargadas_panacea"]
+        agg_prof["tasa_atencion_%"] = np.where(
+            agg_prof["registros_totales"] > 0,
+            (agg_prof["pacientes_atendidos"] / agg_prof["registros_totales"] * 100).round(1),
+            0,
+        )
+        agg_prof["brecha_panacea"] = agg_prof["pacientes_atendidos"] - agg_prof["cargadas_panacea"]
 
-    por_inst = df.groupby("institucion", dropna=True)[["pacientes_programados", "pacientes_atendidos"]].sum().reset_index()
-    por_geo = (
-        df.groupby(["departamento", "municipio"], dropna=True)[["pacientes_programados", "pacientes_atendidos"]]
-        .sum()
-        .reset_index()
-    )
-    por_act = df.groupby("actividad")[["pacientes_programados", "pacientes_atendidos"]].sum().reset_index()
-    por_prior_origen = (
-        df.assign(prior_origen=df["priorizado_origen"].fillna("(Sin origen)"))
-        .groupby("prior_origen")[["pacientes_atendidos"]]
-        .sum()
-        .reset_index()
-    )
+        por_inst = df.groupby("institucion", dropna=True).agg({
+            "id": "count",
+            "atendido": lambda x: (x == 1).sum()
+        }).reset_index()
+        por_inst.columns = ["institucion", "pacientes_programados", "pacientes_atendidos"]
+        
+        por_geo = (
+            df.groupby(["departamento", "municipio"], dropna=True).agg({
+                "id": "count",
+                "atendido": lambda x: (x == 1).sum()
+            })
+            .reset_index()
+        )
+        por_geo.columns = ["departamento", "municipio", "pacientes_programados", "pacientes_atendidos"]
+        
+        por_act = df.groupby("actividad").agg({
+            "id": "count",
+            "atendido": lambda x: (x == 1).sum()
+        }).reset_index()
+        por_act.columns = ["actividad", "pacientes_programados", "pacientes_atendidos"]
+        
+        por_prior_origen = (
+            df[df.get("paciente_priorizado", 0) == 1]
+            .assign(prior_origen=df["priorizado_origen"].fillna("(Sin origen)"))
+            .groupby("prior_origen")
+            .size()
+            .reset_index(name="pacientes_priorizados")
+        )
 
-    xls = to_excel_bytes(
-        {
-            "Detalle": df,
-            "Por_profesional": agg_prof,
-            "Por_institucion": por_inst,
-            "Por_geo": por_geo,
-            "Por_actividad": por_act,
-            "Prior_por_origen": por_prior_origen,
-        }
-    )
+        sheets["Detalle_Atenciones"] = df
+        sheets["Por_Profesional"] = agg_prof
+        sheets["Por_Institucion"] = por_inst
+        sheets["Por_Geo"] = por_geo
+        sheets["Por_Actividad"] = por_act
+        if not por_prior_origen.empty:
+            sheets["Prior_por_Origen"] = por_prior_origen
+
+    # Agregar viáticos
+    if not df_viaticos.empty:
+        sheets["Viaticos"] = df_viaticos
+        viaticos_resumen = df_viaticos.groupby("Profesional", dropna=True).agg({
+            "valor": ["count", "sum"]
+        }).reset_index()
+        viaticos_resumen.columns = ["Profesional", "cantidad_viaticos", "total_valor"]
+        sheets["Viaticos_Resumen"] = viaticos_resumen
+
+    # Agregar agenda
+    if not df_agenda.empty:
+        sheets["Agenda"] = df_agenda
+
+    # Agregar papelería
+    if not df_papeleria.empty:
+        sheets["Papeleria"] = df_papeleria
+        papel_resumen = df_papeleria.groupby(["item", "estado"], dropna=True).agg({
+            "cantidad": "sum"
+        }).reset_index()
+        sheets["Papeleria_Resumen"] = papel_resumen
+
+    xls = to_excel_bytes(sheets)
+    
     st.download_button(
-        "Descargar Excel (.xlsx)",
+        "📥 Descargar reporte completo Excel (.xlsx)",
         data=xls,
-        file_name=f"productividad_profesionales_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        file_name=f"reporte_completo_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
         key="rep_btn_descargar_xlsx",
     )
-    st.download_button(
-        "Descargar detalle (.csv)",
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name=f"productividad_profesionales_detalle_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-        mime="text/csv",
-        use_container_width=True,
-        key="rep_btn_descargar_csv",
-    )
+    
+    # Botones individuales
+    col1, col2, col3 = st.columns(3)
+    
+    if not df.empty:
+        col1.download_button(
+            "Atenciones (.csv)",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name=f"atenciones_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="rep_csv_atenciones",
+        )
+    
+    if not df_viaticos.empty:
+        col2.download_button(
+            "Viáticos (.csv)",
+            data=df_viaticos.to_csv(index=False).encode("utf-8"),
+            file_name=f"viaticos_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="rep_csv_viaticos",
+        )
+    
+    if not df_papeleria.empty:
+        col3.download_button(
+            "Papelería (.csv)",
+            data=df_papeleria.to_csv(index=False).encode("utf-8"),
+            file_name=f"papeleria_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="rep_csv_papeleria",
+        )
 
-# ---------------- UI: VIATICOS ----------------
+    # Mostrar resúmenes
+    st.markdown("### Resumen de datos en el período")
+    
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Atenciones", len(df))
+    r2.metric("Viáticos", len(df_viaticos))
+    r3.metric("Eventos agenda", len(df_agenda))
+    r4.metric("Solicitudes papel.", len(df_papeleria))
+
+# ---------------- UI: VIATICOS (MEJORADO) ----------------
 def ui_viaticos(auth_user: Optional[str]):
     st.subheader("Registro de viáticos")
     c1, c2 = st.columns([1, 1])
@@ -1803,11 +1957,64 @@ def ui_viaticos(auth_user: Optional[str]):
         st.dataframe(df[[c for c in show if c in df.columns]], use_container_width=True, hide_index=True)
         st.metric("Total viáticos (filtro)", f"${df['valor'].fillna(0).sum():,.0f}".replace(",", "."))
 
-# ---------------- UI: PLANIFICADOR ----------------
+    # EDICIÓN/ELIMINACIÓN
+    st.markdown("---")
+    st.markdown("#### Editar / eliminar viático")
+    e1, e2, e3 = st.columns([1, 1, 1])
+    vid_in = e1.number_input("ID de viático", min_value=1, step=1, key="via_edit_id")
+    cargar = e2.button("Cargar", key="via_edit_cargar")
+    eliminar = e3.button("Eliminar", key="via_edit_eliminar")
+
+    if eliminar:
+        try:
+            DATA.delete_viatico(int(vid_in))
+            success_toast("Viático eliminado.")
+            st.rerun()
+        except Exception as e:
+            error_toast(f"No se pudo eliminar: {e}")
+
+    if cargar:
+        rec = DATA.get_viatico_by_id(int(vid_in))
+        if not rec:
+            warn_toast("No existe viático con ese ID.")
+        else:
+            st.markdown("##### Editar viático")
+            ed1, ed2 = st.columns([1, 1])
+            new_fecha = ed1.date_input("Fecha", value=pd.to_datetime(rec["fecha"]).date(), key="via_edit_fecha")
+            new_req = ed2.radio("¿Requiere?", ["No", "Sí"], 
+                              index=1 if rec["requiere_viatico"] == 1 else 0, 
+                              horizontal=True, key="via_edit_req")
+            
+            ed3, ed4 = st.columns([1, 1])
+            new_origen = ed3.text_input("Origen", value=rec["origen"] or "", key="via_edit_origen")
+            new_destino = ed4.text_input("Destino", value=rec["destino"] or "", key="via_edit_destino")
+            
+            new_valor = st.number_input("Valor", min_value=0.0, step=1000.0, 
+                                      value=float(rec["valor"] or 0), key="via_edit_valor")
+            new_obs = st.text_area("Observaciones", value=rec["observaciones"] or "", key="via_edit_obs")
+
+            if st.button("Guardar cambios", type="primary", key="via_edit_guardar"):
+                try:
+                    DATA.update_viatico(
+                        int(vid_in),
+                        {
+                            "fecha": new_fecha.strftime("%Y-%m-%d"),
+                            "requiere_viatico": 1 if new_req == "Sí" else 0,
+                            "origen": new_origen.strip() or None,
+                            "destino": new_destino.strip() or None,
+                            "valor": float(new_valor) if new_valor > 0 else None,
+                            "observaciones": new_obs.strip() or None,
+                        },
+                    )
+                    success_toast("Viático actualizado.")
+                    st.rerun()
+                except Exception as e:
+                    error_toast(f"No se pudo actualizar: {e}")
+
+# ---------------- UI: PLANIFICADOR (MEJORADO) ----------------
 def ui_planificador(auth_user: Optional[str]):
     st.subheader("Planificador (agenda)")
 
-    # CREATE
     c1, c2 = st.columns([1, 1])
     fecha = c1.date_input("Fecha", value=date.today(), key="ag_fecha")
     hi = c1.time_input("Hora inicio", value=dtime(8, 0), key="ag_hora_ini")
@@ -1869,7 +2076,7 @@ def ui_planificador(auth_user: Optional[str]):
         ]
         st.dataframe(df[[c for c in show if c in df.columns]], use_container_width=True, hide_index=True)
 
-    # EDIT / DELETE
+    # EDITAR / ELIMINAR
     st.markdown("---")
     st.markdown("#### Editar / eliminar evento")
     c7, c8, c9 = st.columns([1, 1, 1])
@@ -1890,6 +2097,7 @@ def ui_planificador(auth_user: Optional[str]):
         if not ev:
             warn_toast("No existe evento con ese ID.")
         else:
+            st.markdown("##### Editar evento")
             e1, e2 = st.columns([1, 1])
             new_fecha = e1.date_input("Fecha", value=pd.to_datetime(ev["fecha"]).date(), key="ag_edit_fecha")
             new_hi = e1.time_input(
@@ -1918,7 +2126,7 @@ def ui_planificador(auth_user: Optional[str]):
                 except Exception as e:
                     error_toast(f"No se pudo actualizar: {e}")
 
-# ---------------- UI: PAPELERIA ----------------
+# ---------------- UI: PAPELERIA (MEJORADO) ----------------
 def ui_papeleria(auth_user: Optional[str]):
     st.subheader("Solicitud de papelería")
 
@@ -2001,6 +2209,7 @@ def ui_papeleria(auth_user: Optional[str]):
         if not rec:
             warn_toast("No existe solicitud con ese ID.")
         else:
+            st.markdown("##### Editar solicitud")
             e1, e2 = st.columns([1, 1])
             new_fecha = e1.date_input("Fecha", value=pd.to_datetime(rec["fecha"]).date(), key="pp_edit_fecha")
             new_item = e1.text_input("Ítem", value=rec["item"], key="pp_edit_item")
@@ -2030,13 +2239,14 @@ def ui_papeleria(auth_user: Optional[str]):
                 except Exception as e:
                     error_toast(f"No se pudo actualizar: {e}")
 
-# ---------------- UI: CONFIGURACION ----------------
+# ---------------- UI: CONFIGURACION (MEJORADO CON EDICIÓN/ELIMINACIÓN) ----------------
 def ui_configuracion():
     st.subheader("Configuración de catálogos")
     tabs = st.tabs(["Programas", "Convenios", "Instituciones", "Profesionales", "Pacientes"])
 
-    # Programas
+    # PROGRAMAS
     with tabs[0]:
+        st.markdown("#### Agregar programa")
         c1, c2 = st.columns([2, 1])
         pnom = c1.text_input("Nombre del programa", key="cfg_prog_nombre")
         if c2.button("Agregar programa", use_container_width=True, key="cfg_btn_add_programa"):
@@ -2046,10 +2256,42 @@ def ui_configuracion():
                 DATA.upsert_programa(pnom.strip())
                 success_toast("Programa agregado.")
                 st.rerun()
-        st.dataframe(DATA.list_programas(), use_container_width=True, hide_index=True)
+        
+        st.markdown("#### Programas existentes")
+        df_prog = DATA.list_programas()
+        st.dataframe(df_prog, use_container_width=True, hide_index=True)
+        
+        st.markdown("#### Editar/Eliminar programa")
+        e1, e2, e3 = st.columns([1, 1, 1])
+        pid_edit = e1.number_input("ID programa", min_value=1, step=1, key="cfg_prog_edit_id")
+        cargar_prog = e2.button("Cargar", key="cfg_prog_cargar")
+        eliminar_prog = e3.button("Eliminar", key="cfg_prog_eliminar")
+        
+        if eliminar_prog:
+            try:
+                DATA.delete_programa(int(pid_edit))
+                success_toast("Programa desactivado.")
+                st.rerun()
+            except Exception as e:
+                error_toast(f"Error: {e}")
+        
+        if cargar_prog:
+            prog_rec = DATA.get_programa_by_id(int(pid_edit))
+            if not prog_rec:
+                warn_toast("No existe ese ID.")
+            else:
+                new_nom = st.text_input("Nuevo nombre", value=prog_rec["nombre"], key="cfg_prog_new_nom")
+                if st.button("Actualizar", key="cfg_prog_update"):
+                    try:
+                        DATA.update_programa(int(pid_edit), new_nom)
+                        success_toast("Programa actualizado.")
+                        st.rerun()
+                    except Exception as e:
+                        error_toast(f"Error: {e}")
 
-    # Convenios
+    # CONVENIOS
     with tabs[1]:
+        st.markdown("#### Agregar convenio")
         progs = DATA.list_programas()
         prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
         c1, c2, c3 = st.columns([2, 2, 1])
@@ -2062,10 +2304,46 @@ def ui_configuracion():
                 DATA.upsert_convenio(cv_nom.strip(), prog_map[cv_prog])
                 success_toast("Convenio agregado.")
                 st.rerun()
-        st.dataframe(DATA.list_convenios(), use_container_width=True, hide_index=True)
+        
+        st.markdown("#### Convenios existentes")
+        df_conv = DATA.list_convenios()
+        st.dataframe(df_conv, use_container_width=True, hide_index=True)
+        
+        st.markdown("#### Editar/Eliminar convenio")
+        e1, e2, e3 = st.columns([1, 1, 1])
+        cid_edit = e1.number_input("ID convenio", min_value=1, step=1, key="cfg_conv_edit_id")
+        cargar_conv = e2.button("Cargar", key="cfg_conv_cargar")
+        eliminar_conv = e3.button("Eliminar", key="cfg_conv_eliminar")
+        
+        if eliminar_conv:
+            try:
+                DATA.delete_convenio(int(cid_edit))
+                success_toast("Convenio desactivado.")
+                st.rerun()
+            except Exception as e:
+                error_toast(f"Error: {e}")
+        
+        if cargar_conv:
+            conv_rec = DATA.get_convenio_by_id(int(cid_edit))
+            if not conv_rec:
+                warn_toast("No existe ese ID.")
+            else:
+                ed1, ed2 = st.columns([1, 1])
+                new_prog_id = ed1.selectbox("Programa", options=list(prog_map.keys()), 
+                                           index=list(prog_map.values()).index(conv_rec["programa_id"]) if conv_rec["programa_id"] in prog_map.values() else 0,
+                                           key="cfg_conv_new_prog")
+                new_nom = ed2.text_input("Nuevo nombre", value=conv_rec["nombre"], key="cfg_conv_new_nom")
+                if st.button("Actualizar", key="cfg_conv_update"):
+                    try:
+                        DATA.update_convenio(int(cid_edit), new_nom, prog_map[new_prog_id])
+                        success_toast("Convenio actualizado.")
+                        st.rerun()
+                    except Exception as e:
+                        error_toast(f"Error: {e}")
 
-    # Instituciones
+    # INSTITUCIONES
     with tabs[2]:
+        st.markdown("#### Agregar institución")
         c1, c2, c3, c4, c5 = st.columns([2, 1.2, 1.2, 1.2, 1])
         i_nom = c1.text_input("Nombre institución", key="cfg_inst_nombre")
         i_loc = c2.text_input("Localidad", key="cfg_inst_localidad")
@@ -2078,27 +2356,62 @@ def ui_configuracion():
                 DATA.upsert_institucion(i_nom.strip(), i_loc or None, i_mun or None, i_dep or None)
                 success_toast("Institución agregada.")
                 st.rerun()
-        st.dataframe(DATA.list_instituciones(), use_container_width=True, hide_index=True)
+        
+        st.markdown("#### Instituciones existentes")
+        df_inst = DATA.list_instituciones()
+        st.dataframe(df_inst, use_container_width=True, hide_index=True)
+        
+        st.markdown("#### Editar/Eliminar institución")
+        e1, e2, e3 = st.columns([1, 1, 1])
+        iid_edit = e1.number_input("ID institución", min_value=1, step=1, key="cfg_inst_edit_id")
+        cargar_inst = e2.button("Cargar", key="cfg_inst_cargar")
+        eliminar_inst = e3.button("Eliminar", key="cfg_inst_eliminar")
+        
+        if eliminar_inst:
+            try:
+                DATA.delete_institucion(int(iid_edit))
+                success_toast("Institución desactivada.")
+                st.rerun()
+            except Exception as e:
+                error_toast(f"Error: {e}")
+        
+        if cargar_inst:
+            inst_rec = DATA.get_institucion_by_id(int(iid_edit))
+            if not inst_rec:
+                warn_toast("No existe ese ID.")
+            else:
+                ed1, ed2, ed3, ed4 = st.columns([2, 1, 1, 1])
+                new_nom = ed1.text_input("Nombre", value=inst_rec["nombre"], key="cfg_inst_new_nom")
+                new_loc = ed2.text_input("Localidad", value=inst_rec["localidad"] or "", key="cfg_inst_new_loc")
+                new_mun = ed3.text_input("Municipio", value=inst_rec["municipio"] or "", key="cfg_inst_new_mun")
+                new_dep = ed4.text_input("Departamento", value=inst_rec["departamento"] or "", key="cfg_inst_new_dep")
+                if st.button("Actualizar", key="cfg_inst_update"):
+                    try:
+                        DATA.update_institucion(int(iid_edit), new_nom, new_loc or None, new_mun or None, new_dep or None)
+                        success_toast("Institución actualizada.")
+                        st.rerun()
+                    except Exception as e:
+                        error_toast(f"Error: {e}")
 
         st.markdown("---")
         st.markdown("### Carga masiva de instituciones")
         file_inst = st.file_uploader("Archivo de instituciones (Excel o CSV)", type=["xlsx", "xls", "csv"], key="cfg_up_instituciones")
         if file_inst is not None and st.button("Procesar instituciones", key="cfg_btn_proc_inst"):
             try:
-                df_inst = read_table_upload(file_inst)
-                if "nombre" not in df_inst.columns:
-                    st.error(f"El archivo debe contener 'nombre'. Columnas: {list(df_inst.columns)}")
+                df_inst_up = read_table_upload(file_inst)
+                if "nombre" not in df_inst_up.columns:
+                    st.error(f"El archivo debe contener 'nombre'. Columnas: {list(df_inst_up.columns)}")
                 else:
                     ok = 0
-                    for _, r in df_inst.iterrows():
+                    for _, r in df_inst_up.iterrows():
                         nom = str(r.get("nombre", "")).strip()
                         if not nom:
                             continue
                         DATA.upsert_institucion(
                             nom,
-                            str(r.get("localidad", "")).strip() or None if "localidad" in df_inst.columns else None,
-                            str(r.get("municipio", "")).strip() or None if "municipio" in df_inst.columns else None,
-                            str(r.get("departamento", "")).strip() or None if "departamento" in df_inst.columns else None,
+                            str(r.get("localidad", "")).strip() or None if "localidad" in df_inst_up.columns else None,
+                            str(r.get("municipio", "")).strip() or None if "municipio" in df_inst_up.columns else None,
+                            str(r.get("departamento", "")).strip() or None if "departamento" in df_inst_up.columns else None,
                         )
                         ok += 1
                     success_toast(f"Se procesaron {ok} instituciones.")
@@ -2106,8 +2419,9 @@ def ui_configuracion():
             except Exception as e:
                 st.error(f"Error procesando instituciones: {e}")
 
-    # Profesionales
+    # PROFESIONALES
     with tabs[3]:
+        st.markdown("#### Agregar profesional")
         progs = DATA.list_programas()
         prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
         conv = DATA.list_convenios()
@@ -2131,7 +2445,63 @@ def ui_configuracion():
                 success_toast("Profesional agregado.")
                 st.rerun()
 
-        st.dataframe(DATA.list_Profesionales(), use_container_width=True, hide_index=True)
+        st.markdown("#### Profesionales existentes")
+        df_prof = DATA.list_Profesionales()
+        st.dataframe(df_prof, use_container_width=True, hide_index=True)
+        
+        st.markdown("#### Editar/Eliminar profesional")
+        e1, e2, e3 = st.columns([1, 1, 1])
+        fid_edit = e1.number_input("ID profesional", min_value=1, step=1, key="cfg_prof_edit_id")
+        cargar_prof = e2.button("Cargar", key="cfg_prof_cargar")
+        eliminar_prof = e3.button("Eliminar", key="cfg_prof_eliminar")
+        
+        if eliminar_prof:
+            try:
+                DATA.delete_profesional(int(fid_edit))
+                success_toast("Profesional desactivado.")
+                st.rerun()
+            except Exception as e:
+                error_toast(f"Error: {e}")
+        
+        if cargar_prof:
+            prof_rec = DATA.get_profesional_by_id(int(fid_edit))
+            if not prof_rec:
+                warn_toast("No existe ese ID.")
+            else:
+                st.markdown("##### Editar profesional")
+                ed1, ed2 = st.columns([2, 1])
+                new_nom = ed1.text_input("Nombre", value=prof_rec["nombre"], key="cfg_prof_new_nom")
+                new_doc = ed2.text_input("Documento", value=prof_rec["documento"] or "", key="cfg_prof_new_doc")
+                
+                ed3, ed4, ed5 = st.columns([1, 1, 1])
+                new_email = ed3.text_input("Email", value=prof_rec["email"] or "", key="cfg_prof_new_email")
+                
+                prog_idx = list(prog_map.values()).index(prof_rec["programa_id"]) if prof_rec["programa_id"] in prog_map.values() else 0
+                new_prog = ed4.selectbox("Programa", options=list(prog_map.keys()), index=prog_idx, key="cfg_prof_new_prog")
+                
+                conv_idx = list(conv_map.values()).index(prof_rec["convenio_id"]) if prof_rec["convenio_id"] in conv_map.values() else 0
+                new_conv = ed5.selectbox("Convenio", options=list(conv_map.keys()), index=conv_idx, key="cfg_prof_new_conv")
+                
+                zona_actual = prof_rec.get("zona") or "(No especifica)"
+                if zona_actual not in zona_opts:
+                    zona_actual = "(No especifica)"
+                new_zona = st.selectbox("Zona", options=zona_opts, index=zona_opts.index(zona_actual), key="cfg_prof_new_zona")
+                
+                if st.button("Actualizar", key="cfg_prof_update"):
+                    try:
+                        DATA.update_profesional(
+                            int(fid_edit),
+                            new_nom,
+                            new_doc or None,
+                            new_email or None,
+                            prog_map.get(new_prog),
+                            conv_map.get(new_conv),
+                            None if new_zona == "(No especifica)" else new_zona
+                        )
+                        success_toast("Profesional actualizado.")
+                        st.rerun()
+                    except Exception as e:
+                        error_toast(f"Error: {e}")
 
         st.markdown("---")
         st.markdown("### Carga masiva de profesionales")
@@ -2139,9 +2509,9 @@ def ui_configuracion():
         file_prof = st.file_uploader("Archivo de profesionales", type=["xlsx", "xls", "csv"], key="cfg_up_profesionales")
         if file_prof is not None and st.button("Procesar profesionales", key="cfg_btn_proc_prof"):
             try:
-                df_prof = read_table_upload(file_prof)
-                if "nombre" not in df_prof.columns:
-                    st.error(f"El archivo debe contener 'nombre'. Columnas: {list(df_prof.columns)}")
+                df_prof_up = read_table_upload(file_prof)
+                if "nombre" not in df_prof_up.columns:
+                    st.error(f"El archivo debe contener 'nombre'. Columnas: {list(df_prof_up.columns)}")
                 else:
                     progs2 = DATA.list_programas()
                     prog_map2 = {r["nombre"]: int(r["id"]) for _, r in progs2.iterrows()} if not progs2.empty else {}
@@ -2149,7 +2519,7 @@ def ui_configuracion():
                     conv_map2 = {r["nombre"]: int(r["id"]) for _, r in conv2.iterrows()} if not conv2.empty else {}
 
                     ok = 0
-                    for _, r in df_prof.iterrows():
+                    for _, r in df_prof_up.iterrows():
                         nom = str(r.get("nombre", "")).strip()
                         if not nom:
                             continue
@@ -2173,7 +2543,7 @@ def ui_configuracion():
             except Exception as e:
                 st.error(f"Error procesando profesionales: {e}")
 
-    # Pacientes
+    # PACIENTES
     with tabs[4]:
         st.markdown("### Gestión de pacientes")
         c1, c2 = st.columns([1.2, 2])
@@ -2222,7 +2592,20 @@ def ui_configuracion():
                 except Exception as e:
                     error_toast(f"No se pudo guardar: {e}")
 
-        st.dataframe(DATA.list_pacientes(), use_container_width=True, hide_index=True)
+        st.markdown("#### Pacientes existentes")
+        df_pac = DATA.list_pacientes()
+        st.dataframe(df_pac, use_container_width=True, hide_index=True)
+        
+        st.markdown("#### Eliminar paciente")
+        e1, e2, _ = st.columns([1, 1, 2])
+        pac_id_del = e1.number_input("ID paciente", min_value=1, step=1, key="cfg_pac_del_id")
+        if e2.button("Eliminar paciente", key="cfg_pac_del_btn"):
+            try:
+                DATA.delete_paciente(int(pac_id_del))
+                success_toast("Paciente desactivado.")
+                st.rerun()
+            except Exception as e:
+                error_toast(f"Error: {e}")
 
         st.markdown("---")
         st.markdown("### Carga masiva de pacientes")
@@ -2233,19 +2616,19 @@ def ui_configuracion():
         file_pac = st.file_uploader("Archivo de pacientes (Excel o CSV)", type=["xlsx", "xls", "csv"], key="cfg_up_pacientes")
         if file_pac is not None and st.button("Procesar pacientes", key="cfg_btn_proc_pac"):
             try:
-                df_pac = read_table_upload(file_pac)
-                if not {"documento", "nombre"}.issubset(df_pac.columns):
-                    st.error(f"El archivo debe contener 'documento' y 'nombre'. Columnas detectadas: {list(df_pac.columns)}")
+                df_pac_up = read_table_upload(file_pac)
+                if not {"documento", "nombre"}.issubset(df_pac_up.columns):
+                    st.error(f"El archivo debe contener 'documento' y 'nombre'. Columnas: {list(df_pac_up.columns)}")
                 else:
                     ok = 0
-                    for _, r in df_pac.iterrows():
+                    for _, r in df_pac_up.iterrows():
                         doc = str(r.get("documento", "")).strip()
                         nom = str(r.get("nombre", "")).strip()
                         if not doc or not nom:
                             continue
                         zona = (
                             str(r.get("zona", "")).strip()
-                            if "zona" in df_pac.columns and pd.notna(r.get("zona"))
+                            if "zona" in df_pac_up.columns and pd.notna(r.get("zona"))
                             else None
                         )
                         if zona not in ("Rural", "Urbana"):
@@ -2254,24 +2637,24 @@ def ui_configuracion():
                             numero_documento=doc,
                             nombre=nom,
                             fecha_nacimiento=str(r.get("fecha_nacimiento"))
-                            if "fecha_nacimiento" in df_pac.columns and pd.notna(r.get("fecha_nacimiento"))
+                            if "fecha_nacimiento" in df_pac_up.columns and pd.notna(r.get("fecha_nacimiento"))
                             else None,
-                            sexo=str(r.get("sexo")).strip() if "sexo" in df_pac.columns and pd.notna(r.get("sexo")) else None,
+                            sexo=str(r.get("sexo")).strip() if "sexo" in df_pac_up.columns and pd.notna(r.get("sexo")) else None,
                             telefono=str(r.get("telefono")).strip()
-                            if "telefono" in df_pac.columns and pd.notna(r.get("telefono"))
+                            if "telefono" in df_pac_up.columns and pd.notna(r.get("telefono"))
                             else None,
-                            email=str(r.get("email")).strip() if "email" in df_pac.columns and pd.notna(r.get("email")) else None,
+                            email=str(r.get("email")).strip() if "email" in df_pac_up.columns and pd.notna(r.get("email")) else None,
                             direccion=str(r.get("direccion")).strip()
-                            if "direccion" in df_pac.columns and pd.notna(r.get("direccion"))
+                            if "direccion" in df_pac_up.columns and pd.notna(r.get("direccion"))
                             else None,
                             localidad=str(r.get("localidad")).strip()
-                            if "localidad" in df_pac.columns and pd.notna(r.get("localidad"))
+                            if "localidad" in df_pac_up.columns and pd.notna(r.get("localidad"))
                             else None,
                             municipio=str(r.get("municipio")).strip()
-                            if "municipio" in df_pac.columns and pd.notna(r.get("municipio"))
+                            if "municipio" in df_pac_up.columns and pd.notna(r.get("municipio"))
                             else None,
                             departamento=str(r.get("departamento")).strip()
-                            if "departamento" in df_pac.columns and pd.notna(r.get("departamento"))
+                            if "departamento" in df_pac_up.columns and pd.notna(r.get("departamento"))
                             else None,
                             zona=zona,
                         )
@@ -2284,73 +2667,9 @@ def ui_configuracion():
 # ---------------- UI: RESPALDO ----------------
 def ui_respaldo():
     st.subheader("Respaldo de la base de datos")
-    st.caption(
-        "Descarga la base SQLite actual y/o un paquete ZIP con copias en CSV de todas las tablas y el schema.sql."
-    )
-
-    col1, col2 = st.columns(2)
-
-    # Botón: descargar .db
-    if os.path.exists(DB_SQLITE_PATH):
-        col1.download_button(
-            "⬇️ Descargar base (.db)",
-            data=backup_sqlite_file(),
-            file_name=f"respaldo_sqlite_{datetime.now().strftime('%Y%m%d_%H%M')}.db",
-            mime="application/octet-stream",
-            use_container_width=True,
-            key="bk_btn_db",
-        )
-    else:
-        col1.warning("No se encontró el archivo de base de datos actual.")
-
-    # Botón: descargar ZIP
-    col2.download_button(
-        "⬇️ Descargar ZIP (.db + CSV + schema)",
-        data=build_zip_backup(),
-        file_name=f"respaldo_productividad_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
-        mime="application/zip",
-        use_container_width=True,
-        key="bk_btn_zip",
-    )
-
-def _reset_database(method: str):
-    global SQLITE_CONN, DATA
-    try:
-        if method == "vaciar":
-            with SQLITE_CONN:
-                SQLITE_CONN.execute("PRAGMA foreign_keys=OFF;")
-                for t in ["registros","viaticos","agenda","papeleria",
-                          "Profesional","pacientes","instituciones","convenios","programas"]:
-                    try:
-                        SQLITE_CONN.execute(f"DELETE FROM {t};")
-                    except Exception:
-                        pass
-                SQLITE_CONN.execute("DELETE FROM sqlite_sequence;")
-                SQLITE_CONN.execute("PRAGMA foreign_keys=ON;")
-            SQLITE_CONN.commit()
-        elif method == "borrar_archivo":
-            try:
-                SQLITE_CONN.close()
-            except Exception:
-                pass
-            import os
-            if os.path.exists(DB_SQLITE_PATH):
-                os.remove(DB_SQLITE_PATH)
-            # Re-abrir y recrear esquema
-            SQLITE_CONN = get_sqlite_conn()
-            ensure_sqlite_schema()
-            DATA = DataAccess(SQLITE_CONN)
-    except Exception as e:
-        st.error(f"Error al reiniciar: {e}")
-        return False
-    return True
-
-def ui_respaldo():
-    st.subheader("Respaldo de la base de datos")
     st.caption("Descarga la base SQLite actual y/o un ZIP con CSV y schema.sql.")
 
     col1, col2 = st.columns(2)
-    # Descargar .db
     if os.path.exists(DB_SQLITE_PATH):
         col1.download_button(
             "⬇️ Descargar base (.db)",
@@ -2363,7 +2682,6 @@ def ui_respaldo():
     else:
         col1.warning("No se encontró el archivo de base de datos actual.")
 
-    # Descargar ZIP
     col2.download_button(
         "⬇️ Descargar ZIP (.db + CSV + schema)",
         data=build_zip_backup(),
@@ -2397,6 +2715,35 @@ def ui_respaldo():
                     st.success("Base reiniciada correctamente. Recarga la página.")
                     st.rerun()
 
+def _reset_database(method: str):
+    global SQLITE_CONN, DATA
+    try:
+        if method == "vaciar":
+            with SQLITE_CONN:
+                SQLITE_CONN.execute("PRAGMA foreign_keys=OFF;")
+                for t in ["registros","viaticos","agenda","papeleria",
+                          "Profesionales","pacientes","instituciones","convenios","programas"]:
+                    try:
+                        SQLITE_CONN.execute(f"DELETE FROM {t};")
+                    except Exception:
+                        pass
+                SQLITE_CONN.execute("DELETE FROM sqlite_sequence;")
+                SQLITE_CONN.execute("PRAGMA foreign_keys=ON;")
+            SQLITE_CONN.commit()
+        elif method == "borrar_archivo":
+            try:
+                SQLITE_CONN.close()
+            except Exception:
+                pass
+            if os.path.exists(DB_SQLITE_PATH):
+                os.remove(DB_SQLITE_PATH)
+            SQLITE_CONN = get_sqlite_conn()
+            ensure_sqlite_schema()
+            DATA = DataAccess(SQLITE_CONN)
+    except Exception as e:
+        st.error(f"Error al reiniciar: {e}")
+        return False
+    return True
 
 # ---------------- MAIN ----------------
 def main():
@@ -2459,6 +2806,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
