@@ -2238,105 +2238,29 @@ def ui_papeleria(auth_user: Optional[str]):
                     st.rerun()
                 except Exception as e:
                     error_toast(f"No se pudo actua# ---------------- UI: CONFIGURACION (SECCIÓN INSTITUCIONES CORREGIDA) ----------------
+# ---------------- UI: CONFIGURACION COMPLETA ----------------
 def ui_configuracion():
     st.subheader("Configuración de catálogos")
     tabs = st.tabs(["Programas", "Convenios", "Instituciones", "Profesionales", "Pacientes"])
 
-    # ==================== PESTAÑA INSTITUCIONES ====================
-    with tabs[2]:  # <-- Aquí comienza la pestaña de Instituciones
-        
-        # Formulario para agregar nueva institución
-        st.markdown("#### Agregar institución")
-        c1, c2, c3, c4, c5 = st.columns([2, 1.2, 1.2, 1.2, 1])
-        i_nom = c1.text_input("Nombre institución", key="cfg_inst_nombre")
-        i_loc = c2.text_input("Localidad", key="cfg_inst_localidad")
-        i_mun = c3.text_input("Municipio", key="cfg_inst_municipio")
-        i_dep = c4.text_input("Departamento", key="cfg_inst_departamento")
-        if c5.button("Agregar institución", use_container_width=True, key="cfg_btn_add_inst"):
-            if not i_nom.strip():
-                warn_toast("Escribe el nombre.")
+    # ==================== PROGRAMAS ====================
+    with tabs[0]:
+        st.markdown("#### Agregar programa")
+        c1, c2 = st.columns([2, 1])
+        pnom = c1.text_input("Nombre del programa", key="cfg_prog_nombre")
+        if c2.button("Agregar programa", use_container_width=True, key="cfg_btn_add_programa"):
+            if not pnom.strip():
+                warn_toast("Escribe un nombre.")
             else:
-                DATA.upsert_institucion(i_nom.strip(), i_loc or None, i_mun or None, i_dep or None)
-                success_toast("Institución agregada.")
+                DATA.upsert_programa(pnom.strip())
+                success_toast("Programa agregado.")
                 st.rerun()
         
-        # Mostrar tabla de instituciones existentes
-        st.markdown("#### Instituciones existentes")
-        df_inst = DATA.list_instituciones()
-        st.dataframe(df_inst, use_container_width=True, hide_index=True)
-        
-        st.markdown("---")
-        st.markdown("#### ✏️ Editar / Eliminar institución")
-        
-        # 🔴 PASO 1: Inicializar variable de session_state (va AQUÍ)
-        if "edit_inst_id" not in st.session_state:
-            st.session_state.edit_inst_id = None
-        
-        # Controles para cargar ID y eliminar
-        e1, e2, e3 = st.columns([1, 1, 1])
-        iid_edit = e1.number_input("ID institución", min_value=1, step=1, key="cfg_inst_edit_id")
-        cargar_inst = e2.button("📋 Cargar", use_container_width=True, key="cfg_inst_cargar")
-        eliminar_inst = e3.button("🗑️ Eliminar", use_container_width=True, key="cfg_inst_eliminar")
-        
-        # Eliminar institución
-        if eliminar_inst:
-            try:
-                DATA.delete_institucion(int(iid_edit))
-                success_toast("Institución desactivada.")
-                st.rerun()
-            except Exception as e:
-                error_toast(f"Error: {e}")
-        
-        # 🔴 PASO 2: Al presionar Cargar, guardar en session_state (va AQUÍ)
-        if cargar_inst:
-            st.session_state.edit_inst_id = int(iid_edit)
-            st.rerun()
-        
-        # 🔴 PASO 3: Mostrar formulario SOLO si hay ID guardado (va AQUÍ)
-        if st.session_state.edit_inst_id is not None:
-            inst_rec = DATA.get_institucion_by_id(st.session_state.edit_inst_id)
-            if not inst_rec:
-                warn_toast("No existe ese ID.")
-                st.session_state.edit_inst_id = None
-            else:
-                st.markdown("##### 📝 Editando institución")
-                
-                # Campos de edición
-                ed1, ed2, ed3, ed4 = st.columns([2, 1, 1, 1])
-                new_nom = ed1.text_input("Nombre", value=inst_rec["nombre"], key="cfg_inst_new_nom")
-                new_loc = ed2.text_input("Localidad", value=inst_rec["localidad"] or "", key="cfg_inst_new_loc")
-                new_mun = ed3.text_input("Municipio", value=inst_rec["municipio"] or "", key="cfg_inst_new_mun")
-                new_dep = ed4.text_input("Departamento", value=inst_rec["departamento"] or "", key="cfg_inst_new_dep")
-                
-                # Botones de Guardar y Cancelar
-                col_save, col_cancel = st.columns([1, 1])
-                
-                # 🔴 Botón GUARDAR (va AQUÍ)
-                if col_save.button("💾 Actualizar", type="primary", use_container_width=True, key="cfg_inst_update"):
-                    try:
-                        DATA.update_institucion(
-                            st.session_state.edit_inst_id, 
-                            new_nom, 
-                            new_loc or None, 
-                            new_mun or None, 
-                            new_dep or None
-                        )
-                        success_toast("Institución actualizada correctamente.")
-                        st.session_state.edit_inst_id = None  # Limpiar estado
-                        st.rerun()
-                    except Exception as e:
-                        error_toast(f"Error al actualizar: {e}")
-                
-                # Botón CANCELAR
-                if col_cancel.button("❌ Cancelar", use_container_width=True, key="cfg_inst_cancel"):
-                    st.session_state.edit_inst_id = None
-                    st.rerun()
-        
-        # Carga masiva (continúa como estaba)
-        st.markdown("---")
-        st.markdown("### Carga masiva de instituciones")
-        # ... resto del código de carga masiva ...
-        # CONVENIOS
+        st.markdown("#### Programas existentes")
+        df_prog = DATA.list_programas()
+        st.dataframe(df_prog, use_container_width=True, hide_index=True)
+
+    # ==================== CONVENIOS ====================
     with tabs[1]:
         st.markdown("#### Agregar convenio")
         progs = DATA.list_programas()
@@ -2355,286 +2279,183 @@ def ui_configuracion():
         st.markdown("#### Convenios existentes")
         df_conv = DATA.list_convenios()
         st.dataframe(df_conv, use_container_width=True, hide_index=True)
+
+    # ==================== INSTITUCIONES ====================
+    with tabs[2]:
+        st.markdown("#### Agregar institución")
+        c1, c2, c3, c4, c5 = st.columns([2, 1.2, 1.2, 1.2, 1])
+        i_nom = c1.text_input("Nombre institución", key="cfg_inst_nombre")
+        i_loc = c2.text_input("Localidad", key="cfg_inst_localidad")
+        i_mun = c3.text_input("Municipio", key="cfg_inst_municipio")
+        i_dep = c4.text_input("Departamento", key="cfg_inst_departamento")
+        if c5.button("Agregar institución", use_container_width=True, key="cfg_btn_add_inst"):
+            if not i_nom.strip():
+                warn_toast("Escribe el nombre.")
+            else:
+                DATA.upsert_institucion(i_nom.strip(), i_loc or None, i_mun or None, i_dep or None)
+                success_toast("Institución agregada.")
+                st.rerun()
         
-        st.markdown("#### Editar/Eliminar convenio")
+        st.markdown("#### Instituciones existentes")
+        df_inst = DATA.list_instituciones()
+        st.dataframe(df_inst, use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        st.markdown("#### ✏️ Editar / Eliminar institución")
+        
+        # Inicializar estado de edición
+        if "editing_inst_id" not in st.session_state:
+            st.session_state.editing_inst_id = None
+        if "editing_inst_data" not in st.session_state:
+            st.session_state.editing_inst_data = {}
+        
+        # Controles para cargar y eliminar
         e1, e2, e3 = st.columns([1, 1, 1])
-        cid_edit = e1.number_input("ID convenio", min_value=1, step=1, key="cfg_conv_edit_id")
-        cargar_conv = e2.button("Cargar", key="cfg_conv_cargar")
-        eliminar_conv = e3.button("Eliminar", key="cfg_conv_eliminar")
+        iid_edit = e1.number_input("ID institución", min_value=1, step=1, key="cfg_inst_edit_id")
+        cargar_inst = e2.button("📋 Cargar", use_container_width=True, key="cfg_inst_cargar")
+        eliminar_inst = e3.button("🗑️ Eliminar", use_container_width=True, key="cfg_inst_eliminar")
         
-        if eliminar_conv:
+        # Eliminar
+        if eliminar_inst:
             try:
-                DATA.delete_convenio(int(cid_edit))
-                success_toast("Convenio desactivado.")
+                DATA.delete_institucion(int(iid_edit))
+                success_toast("Institución desactivada.")
+                st.session_state.editing_inst_id = None
+                st.session_state.editing_inst_data = {}
                 st.rerun()
             except Exception as e:
                 error_toast(f"Error: {e}")
         
-        if cargar_conv:
-            conv_rec = DATA.get_convenio_by_id(int(cid_edit))
-            if not conv_rec:
-                warn_toast("No existe ese ID.")
+        # Cargar datos para edición
+        if cargar_inst:
+            inst_rec = DATA.get_institucion_by_id(int(iid_edit))
+            if not inst_rec:
+                warn_toast("No existe institución con ese ID.")
+                st.session_state.editing_inst_id = None
+                st.session_state.editing_inst_data = {}
             else:
-                ed1, ed2 = st.columns([1, 1])
-                new_prog_id = ed1.selectbox("Programa", options=list(prog_map.keys()), 
-                                           index=list(prog_map.values()).index(conv_rec["programa_id"]) if conv_rec["programa_id"] in prog_map.values() else 0,
-                                           key="cfg_conv_new_prog")
-                new_nom = ed2.text_input("Nuevo nombre", value=conv_rec["nombre"], key="cfg_conv_new_nom")
-                if st.button("Actualizar", key="cfg_conv_update"):
+                st.session_state.editing_inst_id = inst_rec["id"]
+                st.session_state.editing_inst_data = {
+                    "nombre": inst_rec["nombre"],
+                    "localidad": inst_rec["localidad"] or "",
+                    "municipio": inst_rec["municipio"] or "",
+                    "departamento": inst_rec["departamento"] or ""
+                }
+                st.rerun()
+        
+        # Mostrar formulario de edición
+        if st.session_state.editing_inst_id is not None:
+            st.markdown("---")
+            st.success(f"📝 **Editando institución ID: {st.session_state.editing_inst_id}**")
+            
+            with st.form(key="form_edit_inst", clear_on_submit=False):
+                ed1, ed2, ed3, ed4 = st.columns([2, 1, 1, 1])
+                
+                new_nom = ed1.text_input(
+                    "Nombre *", 
+                    value=st.session_state.editing_inst_data["nombre"],
+                    key="form_edit_inst_nom"
+                )
+                new_loc = ed2.text_input(
+                    "Localidad", 
+                    value=st.session_state.editing_inst_data["localidad"],
+                    key="form_edit_inst_loc"
+                )
+                new_mun = ed3.text_input(
+                    "Municipio", 
+                    value=st.session_state.editing_inst_data["municipio"],
+                    key="form_edit_inst_mun"
+                )
+                new_dep = ed4.text_input(
+                    "Departamento", 
+                    value=st.session_state.editing_inst_data["departamento"],
+                    key="form_edit_inst_dep"
+                )
+                
+                col_save, col_cancel = st.columns([1, 1])
+                submit = col_save.form_submit_button("💾 Actualizar", type="primary", use_container_width=True)
+                cancel = col_cancel.form_submit_button("❌ Cancelar", use_container_width=True)
+            
+            if submit:
+                if not new_nom.strip():
+                    error_toast("El nombre es obligatorio")
+                else:
                     try:
-                        DATA.update_convenio(int(cid_edit), new_nom, prog_map[new_prog_id])
-                        success_toast("Convenio actualizado.")
+                        DATA.update_institucion(
+                            st.session_state.editing_inst_id, 
+                            new_nom.strip(), 
+                            new_loc.strip() or None, 
+                            new_mun.strip() or None, 
+                            new_dep.strip() or None
+                        )
+                        success_toast("✅ Institución actualizada correctamente")
+                        st.session_state.editing_inst_id = None
+                        st.session_state.editing_inst_data = {}
                         st.rerun()
                     except Exception as e:
-                        error_toast(f"Error: {e}")
-
-    # INSTITUCIONES
-# INSTITUCIONES (SOLUCIÓN CON FORM - SIN RECARGAS AUTOMÁTICAS)
-with tabs[2]:
-    st.markdown("#### Agregar institución")
-    c1, c2, c3, c4, c5 = st.columns([2, 1.2, 1.2, 1.2, 1])
-    i_nom = c1.text_input("Nombre institución", key="cfg_inst_nombre")
-    i_loc = c2.text_input("Localidad", key="cfg_inst_localidad")
-    i_mun = c3.text_input("Municipio", key="cfg_inst_municipio")
-    i_dep = c4.text_input("Departamento", key="cfg_inst_departamento")
-    if c5.button("Agregar institución", use_container_width=True, key="cfg_btn_add_inst"):
-        if not i_nom.strip():
-            warn_toast("Escribe el nombre.")
-        else:
-            DATA.upsert_institucion(i_nom.strip(), i_loc or None, i_mun or None, i_dep or None)
-            success_toast("Institución agregada.")
-            st.rerun()
-    
-    st.markdown("#### Instituciones existentes")
-    df_inst = DATA.list_instituciones()
-    st.dataframe(df_inst, use_container_width=True, hide_index=True)
-    
-    st.markdown("---")
-    st.markdown("#### ✏️ Editar / Eliminar institución")
-    
-    # Inicializar estado de edición
-    if "editing_inst_id" not in st.session_state:
-        st.session_state.editing_inst_id = None
-    if "editing_inst_data" not in st.session_state:
-        st.session_state.editing_inst_data = {}
-    
-    # Controles para cargar y eliminar (FUERA del form)
-    e1, e2, e3 = st.columns([1, 1, 1])
-    iid_edit = e1.number_input("ID institución", min_value=1, step=1, key="cfg_inst_edit_id")
-    cargar_inst = e2.button("📋 Cargar", use_container_width=True, key="cfg_inst_cargar")
-    eliminar_inst = e3.button("🗑️ Eliminar", use_container_width=True, key="cfg_inst_eliminar")
-    
-    # Eliminar
-    if eliminar_inst:
-        try:
-            DATA.delete_institucion(int(iid_edit))
-            success_toast("Institución desactivada.")
-            st.session_state.editing_inst_id = None
-            st.session_state.editing_inst_data = {}
-            st.rerun()
-        except Exception as e:
-            error_toast(f"Error: {e}")
-    
-    # Cargar datos para edición
-    if cargar_inst:
-        inst_rec = DATA.get_institucion_by_id(int(iid_edit))
-        if not inst_rec:
-            warn_toast("No existe institución con ese ID.")
-            st.session_state.editing_inst_id = None
-            st.session_state.editing_inst_data = {}
-        else:
-            st.session_state.editing_inst_id = inst_rec["id"]
-            st.session_state.editing_inst_data = {
-                "nombre": inst_rec["nombre"],
-                "localidad": inst_rec["localidad"] or "",
-                "municipio": inst_rec["municipio"] or "",
-                "departamento": inst_rec["departamento"] or ""
-            }
-            st.rerun()
-    
-    # Mostrar formulario de edición (DENTRO de un form)
-    if st.session_state.editing_inst_id is not None:
-        st.markdown("---")
-        st.success(f"📝 **Editando institución ID: {st.session_state.editing_inst_id}**")
-        
-        # 🔑 USAR FORM PARA EVITAR RECARGAS AUTOMÁTICAS
-        with st.form(key="form_edit_inst", clear_on_submit=False):
-            ed1, ed2, ed3, ed4 = st.columns([2, 1, 1, 1])
+                        error_toast(f"Error al actualizar: {e}")
             
-            # Los campos dentro del form NO recargan la página al escribir
-            new_nom = ed1.text_input(
-                "Nombre *", 
-                value=st.session_state.editing_inst_data["nombre"],
-                key="form_edit_inst_nom"
-            )
-            new_loc = ed2.text_input(
-                "Localidad", 
-                value=st.session_state.editing_inst_data["localidad"],
-                key="form_edit_inst_loc"
-            )
-            new_mun = ed3.text_input(
-                "Municipio", 
-                value=st.session_state.editing_inst_data["municipio"],
-                key="form_edit_inst_mun"
-            )
-            new_dep = ed4.text_input(
-                "Departamento", 
-                value=st.session_state.editing_inst_data["departamento"],
-                key="form_edit_inst_dep"
-            )
-            
-            col_save, col_cancel = st.columns([1, 1])
-            
-            # Botón de guardar (dentro del form)
-            submit = col_save.form_submit_button(
-                "💾 Actualizar", 
-                type="primary", 
-                use_container_width=True
-            )
-            
-            # Botón de cancelar (fuera del form pero junto al guardar)
-            cancel = col_cancel.form_submit_button(
-                "❌ Cancelar", 
-                use_container_width=True
-            )
-        
-        # Procesar el submit (FUERA del form)
-        if submit:
-            if not new_nom.strip():
-                error_toast("El nombre es obligatorio")
-            else:
-                try:
-                    DATA.update_institucion(
-                        st.session_state.editing_inst_id, 
-                        new_nom.strip(), 
-                        new_loc.strip() or None, 
-                        new_mun.strip() or None, 
-                        new_dep.strip() or None
-                    )
-                    success_toast("✅ Institución actualizada correctamente")
-                    st.session_state.editing_inst_id = None
-                    st.session_state.editing_inst_data = {}
-                    st.rerun()
-                except Exception as e:
-                    error_toast(f"Error al actualizar: {e}")
-        
-        if cancel:
-            st.session_state.editing_inst_id = None
-            st.session_state.editing_inst_data = {}
-            st.rerun()
-
-    st.markdown("---")
-    st.markdown("### Carga masiva de instituciones")
-    file_inst = st.file_uploader("Archivo de instituciones (Excel o CSV)", type=["xlsx", "xls", "csv"], key="cfg_up_instituciones")
-    if file_inst is not None and st.button("Procesar instituciones", key="cfg_btn_proc_inst"):
-        try:
-            df_inst_up = read_table_upload(file_inst)
-            if "nombre" not in df_inst_up.columns:
-                st.error(f"El archivo debe contener 'nombre'. Columnas: {list(df_inst_up.columns)}")
-            else:
-                ok = 0
-                for _, r in df_inst_up.iterrows():
-                    nom = str(r.get("nombre", "")).strip()
-                    if not nom:
-                        continue
-                    DATA.upsert_institucion(
-                        nom,
-                        str(r.get("localidad", "")).strip() or None if "localidad" in df_inst_up.columns else None,
-                        str(r.get("municipio", "")).strip() or None if "municipio" in df_inst_up.columns else None,
-                        str(r.get("departamento", "")).strip() or None if "departamento" in df_inst_up.columns else None,
-                    )
-                    ok += 1
-                success_toast(f"Se procesaron {ok} instituciones.")
+            if cancel:
+                st.session_state.editing_inst_id = None
+                st.session_state.editing_inst_data = {}
                 st.rerun()
-        except Exception as e:
-            st.error(f"Error procesando instituciones: {e}")
-    # PROFESIONALES
+
+        st.markdown("---")
+        st.markdown("### Carga masiva de instituciones")
+        file_inst = st.file_uploader("Archivo de instituciones (Excel o CSV)", type=["xlsx", "xls", "csv"], key="cfg_up_instituciones")
+        if file_inst is not None and st.button("Procesar instituciones", key="cfg_btn_proc_inst"):
+            try:
+                df_inst_up = read_table_upload(file_inst)
+                if "nombre" not in df_inst_up.columns:
+                    st.error(f"El archivo debe contener 'nombre'. Columnas: {list(df_inst_up.columns)}")
+                else:
+                    ok = 0
+                    for _, r in df_inst_up.iterrows():
+                        nom = str(r.get("nombre", "")).strip()
+                        if not nom:
+                            continue
+                        DATA.upsert_institucion(
+                            nom,
+                            str(r.get("localidad", "")).strip() or None if "localidad" in df_inst_up.columns else None,
+                            str(r.get("municipio", "")).strip() or None if "municipio" in df_inst_up.columns else None,
+                            str(r.get("departamento", "")).strip() or None if "departamento" in df_inst_up.columns else None,
+                        )
+                        ok += 1
+                    success_toast(f"Se procesaron {ok} instituciones.")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Error procesando instituciones: {e}")
+
+    # ==================== PROFESIONALES ====================
     with tabs[3]:
         st.markdown("#### Agregar profesional")
         progs = DATA.list_programas()
         prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
-        conv = DATA.list_convenios()
-        conv_map = {r["nombre"]: int(r["id"]) for _, r in conv.iterrows()} if not conv.empty else {}
 
-        c1, c2, c3, c4, c5, c6 = st.columns([2, 1.2, 1.4, 1.4, 1.2, 1.2])
+        c1, c2, c3 = st.columns([2, 1.2, 1.4])
         f_nom = c1.text_input("Nombre profesional", key="cfg_prof_nombre")
         f_doc = c2.text_input("Documento (opcional)", key="cfg_prof_doc")
         f_email = c3.text_input("Email (opcional)", key="cfg_prof_email")
-        f_prog = c4.selectbox("Programa", options=list(prog_map.keys()) if prog_map else [], key="cfg_prof_prog")
-        f_conv = c5.selectbox("Convenio", options=list(conv_map.keys()) if conv_map else [], key="cfg_prof_conv")
+        
         zona_opts = ["(No especifica)", "Urbana", "Rural"]
-        f_zona = c6.selectbox("Zona (opcional)", options=zona_opts, key="cfg_prof_zona")
+        f_zona = st.selectbox("Zona (opcional)", options=zona_opts, key="cfg_prof_zona")
 
         if st.button("Agregar profesional", use_container_width=True, key="cfg_btn_add_prof"):
             if not f_nom.strip():
                 warn_toast("Escribe el nombre.")
             else:
                 zona = None if f_zona == "(No especifica)" else f_zona
-                DATA.upsert_Profesional(f_nom.strip(), f_doc or None, f_email or None, prog_map.get(f_prog), conv_map.get(f_conv), zona)
+                DATA.upsert_Profesional(f_nom.strip(), f_doc or None, f_email or None, PROGRAMA_FIJO_ID, CONVENIO_FIJO_ID, zona)
                 success_toast("Profesional agregado.")
                 st.rerun()
 
         st.markdown("#### Profesionales existentes")
         df_prof = DATA.list_Profesionales()
         st.dataframe(df_prof, use_container_width=True, hide_index=True)
-        
-        st.markdown("#### Editar/Eliminar profesional")
-        e1, e2, e3 = st.columns([1, 1, 1])
-        fid_edit = e1.number_input("ID profesional", min_value=1, step=1, key="cfg_prof_edit_id")
-        cargar_prof = e2.button("Cargar", key="cfg_prof_cargar")
-        eliminar_prof = e3.button("Eliminar", key="cfg_prof_eliminar")
-        
-        if eliminar_prof:
-            try:
-                DATA.delete_profesional(int(fid_edit))
-                success_toast("Profesional desactivado.")
-                st.rerun()
-            except Exception as e:
-                error_toast(f"Error: {e}")
-        
-        if cargar_prof:
-            prof_rec = DATA.get_profesional_by_id(int(fid_edit))
-            if not prof_rec:
-                warn_toast("No existe ese ID.")
-            else:
-                st.markdown("##### Editar profesional")
-                ed1, ed2 = st.columns([2, 1])
-                new_nom = ed1.text_input("Nombre", value=prof_rec["nombre"], key="cfg_prof_new_nom")
-                new_doc = ed2.text_input("Documento", value=prof_rec["documento"] or "", key="cfg_prof_new_doc")
-                
-                ed3, ed4, ed5 = st.columns([1, 1, 1])
-                new_email = ed3.text_input("Email", value=prof_rec["email"] or "", key="cfg_prof_new_email")
-                
-                prog_idx = list(prog_map.values()).index(prof_rec["programa_id"]) if prof_rec["programa_id"] in prog_map.values() else 0
-                new_prog = ed4.selectbox("Programa", options=list(prog_map.keys()), index=prog_idx, key="cfg_prof_new_prog")
-                
-                conv_idx = list(conv_map.values()).index(prof_rec["convenio_id"]) if prof_rec["convenio_id"] in conv_map.values() else 0
-                new_conv = ed5.selectbox("Convenio", options=list(conv_map.keys()), index=conv_idx, key="cfg_prof_new_conv")
-                
-                zona_actual = prof_rec.get("zona") or "(No especifica)"
-                if zona_actual not in zona_opts:
-                    zona_actual = "(No especifica)"
-                new_zona = st.selectbox("Zona", options=zona_opts, index=zona_opts.index(zona_actual), key="cfg_prof_new_zona")
-                
-                if st.button("Actualizar", key="cfg_prof_update"):
-                    try:
-                        DATA.update_profesional(
-                            int(fid_edit),
-                            new_nom,
-                            new_doc or None,
-                            new_email or None,
-                            prog_map.get(new_prog),
-                            conv_map.get(new_conv),
-                            None if new_zona == "(No especifica)" else new_zona
-                        )
-                        success_toast("Profesional actualizado.")
-                        st.rerun()
-                    except Exception as e:
-                        error_toast(f"Error: {e}")
 
         st.markdown("---")
         st.markdown("### Carga masiva de profesionales")
-        st.caption("Columnas: **nombre** (obligatoria), opcionales: documento, email, programa, convenio, zona (Rural/Urbana).")
+        st.caption("Columnas: **nombre** (obligatoria), opcionales: documento, email, zona (Rural/Urbana).")
         file_prof = st.file_uploader("Archivo de profesionales", type=["xlsx", "xls", "csv"], key="cfg_up_profesionales")
         if file_prof is not None and st.button("Procesar profesionales", key="cfg_btn_proc_prof"):
             try:
@@ -2642,11 +2463,6 @@ with tabs[2]:
                 if "nombre" not in df_prof_up.columns:
                     st.error(f"El archivo debe contener 'nombre'. Columnas: {list(df_prof_up.columns)}")
                 else:
-                    progs2 = DATA.list_programas()
-                    prog_map2 = {r["nombre"]: int(r["id"]) for _, r in progs2.iterrows()} if not progs2.empty else {}
-                    conv2 = DATA.list_convenios()
-                    conv_map2 = {r["nombre"]: int(r["id"]) for _, r in conv2.iterrows()} if not conv2.empty else {}
-
                     ok = 0
                     for _, r in df_prof_up.iterrows():
                         nom = str(r.get("nombre", "")).strip()
@@ -2654,25 +2470,17 @@ with tabs[2]:
                             continue
                         doc = str(r.get("documento", "")).strip() if pd.notna(r.get("documento")) else None
                         email = str(r.get("email", "")).strip() if pd.notna(r.get("email")) else None
-                        p_name = str(r.get("programa", "")).strip() if pd.notna(r.get("programa")) else None
-                        c_name = str(r.get("convenio", "")).strip() if pd.notna(r.get("convenio")) else None
                         zona = str(r.get("zona", "")).strip() if pd.notna(r.get("zona")) else None
                         if zona not in ("Rural", "Urbana"):
                             zona = None
-                        pid = prog_map2.get(p_name) if p_name else None
-                        cid = conv_map2.get(c_name) if c_name else None
-                        if p_name and not pid:
-                            pid = DATA.upsert_programa(p_name)
-                        if c_name and not cid and pid:
-                            cid = DATA.upsert_convenio(c_name, pid)
-                        DATA.upsert_Profesional(nom, doc, email, pid, cid, zona)
+                        DATA.upsert_Profesional(nom, doc, email, PROGRAMA_FIJO_ID, CONVENIO_FIJO_ID, zona)
                         ok += 1
                     success_toast(f"Se procesaron {ok} profesionales.")
                     st.rerun()
             except Exception as e:
                 st.error(f"Error procesando profesionales: {e}")
 
-    # PACIENTES
+    # ==================== PACIENTES ====================
     with tabs[4]:
         st.markdown("### Gestión de pacientes")
         c1, c2 = st.columns([1.2, 2])
@@ -2724,17 +2532,6 @@ with tabs[2]:
         st.markdown("#### Pacientes existentes")
         df_pac = DATA.list_pacientes()
         st.dataframe(df_pac, use_container_width=True, hide_index=True)
-        
-        st.markdown("#### Eliminar paciente")
-        e1, e2, _ = st.columns([1, 1, 2])
-        pac_id_del = e1.number_input("ID paciente", min_value=1, step=1, key="cfg_pac_del_id")
-        if e2.button("Eliminar paciente", key="cfg_pac_del_btn"):
-            try:
-                DATA.delete_paciente(int(pac_id_del))
-                success_toast("Paciente desactivado.")
-                st.rerun()
-            except Exception as e:
-                error_toast(f"Error: {e}")
 
         st.markdown("---")
         st.markdown("### Carga masiva de pacientes")
@@ -2792,7 +2589,7 @@ with tabs[2]:
                     st.rerun()
             except Exception as e:
                 st.error(f"Error procesando pacientes: {e}")
-
+                    
 # ---------------- UI: RESPALDO ----------------
 def ui_respaldo():
     st.subheader("Respaldo de la base de datos")
@@ -2935,4 +2732,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
