@@ -996,35 +996,502 @@ def backup_sqlite_file() -> bytes:
     with open(DB_SQLITE_PATH, "rb") as f:
         return f.read()
 
-def build_zip_backup() -> bytes:
+# ---------------- SISTEMA DE RESPALDOS AUTOMÁTICOS ----------------
+BACKUP_DIR = "respaldos_automaticos"
+
+def ensure_backup_directory():
+    """Crea el directorio de respaldos si no existe"""
+    if not os.path.exists(BACKUP_DIR):
+        os.makedirs(BACKUP_DIR)
+        st.sidebar.info(f"📁 Directorio de respaldos creado: {BACKUP_DIR}")
+
+def create_automatic_backup(trigger: str = "manual") -> str:
+    """
+    Crea un respaldo automático con timestamp
+    trigger: 'manual', 'auto_daily', 'auto_hourly', 'before_operation'
+    """
+    ensure_backup_directory()
+    
+    if not os.path.exists(DB_SQLITE_PATH):
+        return None
+    
     try:
         SQLITE_CONN.commit()
-    except Exception:
+    except:
         pass
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        # DB
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_filename = f"backup_{trigger}_{timestamp}.db"
+    backup_path = os.path.join(BACKUP_DIR, backup_filename)
+    
+    try:
+        shutil.copy2(DB_SQLITE_PATH, backup_path)
+        return backup_path
+    except Exception as e:
+        st.error(f"Error creando respaldo: {e}")
+        return None
+
+def list_available_backups() -> List[Dict[str, Any]]:
+    """Lista todos los respaldos disponibles con información"""
+    ensure_backup_directory()
+    
+    backups = []
+    if os.path.exists(BACKUP_DIR):
+        for filename in os.listdir(BACKUP_DIR):
+            if filename.endswith('.db'):
+                filepath = os.path.join(BACKUP_DIR, filename)
+                file_stat = os.stat(filepath)
+                
+                # Extraer información del nombre del archivo
+                # Formato: backup_trigger_YYYYMMDD_HHMMSS.db
+                parts = filename.replace('.db', '').split('_')
+                
+                backups.append({
+                    'filename': filename,
+                    'filepath': filepath,
+                    'size': file_stat.st_size,
+                    'created': datetime.fromtimestamp(file_stat.st_mtime),
+                    'trigger': parts[1] if len(parts) > 1 else 'unknown',
+                })
+    
+    # Ordenar por fecha de creación (más reciente primero)
+    backups.sort(key=lambda x: x['created'], reverse=True)
+    return backups
+
+def restore_from_backup(backup_path: str) -> bool:
+    """Restaura la base de datos desde un respaldo específico"""
+    global SQLITE_CONN, DATA
+    
+    if not os.path.exists(backup_path):
+        st.error(f"El respaldo no existe: {backup_path}")
+        return False
+    
+    try:
+        # Crear respaldo de seguridad de la BD actual
         if os.path.exists(DB_SQLITE_PATH):
-            z.writestr(os.path.basename(DB_SQLITE_PATH), backup_sqlite_file())
-        # CSV de tablas
-        tbls = pd.read_sql_query(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-            SQLITE_CONN,
-        )
-        for t in tbls["name"].tolist():
-            try:
-                df = pd.read_sql_query(f"SELECT * FROM {t}", SQLITE_CONN)
-                z.writestr(f"csv/{t}.csv", df.to_csv(index=False))
-            except Exception as e:
-                z.writestr(f"csv/{t}_ERROR.txt", f"No se pudo exportar {t}: {e}")
-        # schema
+            safety_backup = f"{DB_SQLITE_PATH}.before_restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            shutil.copy2(DB_SQLITE_PATH, safety_backup)
+            st.info(f"✅ Respaldo de seguridad creado: {safety_backup}")
+        
+        # Cerrar conexión actual
         try:
-            ddl_joined = "\n\n".join(SQLITE_DDL.values())
-            z.writestr("schema.sql", ddl_joined)
-        except Exception:
+            SQLITE_CONN.close()
+        except:
             pass
-    buf.seek(0)
-    return buf.getvalue()
+        
+        # Restaurar desde el respaldo seleccionado
+        shutil.copy2(backup_path, DB_SQLITE_PATH)
+        
+        # Reconectar
+        time.sleep(0.3)
+        SQLITE_CONN = get_db_connection()
+        DATA = DataAccess(SQLITE_CONN)
+        
+        # Verificar
+        count = SQLITE_CONN.execute("SELECT COUNT(*) FROM registros").fetchone()[0]
+        st.success(f"✅ Base restaurada correctamente desde: {os.path.basename(backup_path)}")
+        st.info(f"📊 {count} registros encontrados en la base restaurada")
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"❌ Error restaurando: {e}")
+        st.code(traceback.format_exc())
+        return False
+
+def delete_backup(backup_path: str) -> bool:
+    """Elimina un respaldo específico"""
+    try:
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
+            return True
+        return False
+    except Exception as e:
+        st.error(f"Error eliminando respaldo: {e}")
+        return False
+
+def auto_backup_on_startup():
+    """Crea un respaldo automático al iniciar la aplicación"""
+    if os.path.exists(DB_SQLITE_PATH):
+        # Solo crear respaldo si han pasado más de 1 hora desde el último
+        ensure_backup_directory()
+        backups = list_available_backups()
+        
+        should_backup = True
+        if backups:
+            last_backup_time = backups[0]['created']
+            hours_since_last = (datetime.now() - last_backup_time).total_seconds() / 3600
+            should_backup = hours_since_last >= 1
+        
+        if should_backup:
+            backup_path = create_automatic_backup(trigger="auto_startup")
+            if backup_path:
+                st.sidebar.success(f"✅ Respaldo automático creado")
+
+def cleanup_old_backups(keep_last_n: int = 20):
+    """Limpia respaldos antiguos manteniendo solo los últimos N"""
+    backups = list_available_backups()
+    
+    if len(backups) > keep_last_n:
+        to_delete = backups[keep_last_n:]
+        deleted = 0
+        for backup in to_delete:
+            if delete_backup(backup['filepath']):
+                deleted += 1
+        
+        if deleted > 0:
+            st.info(f"🧹 Se eliminaron {deleted} respaldos antiguos (manteniendo los últimos {keep_last_n})")
+
+def export_data_to_json() -> bytes:
+    """Exporta todos los datos a formato JSON para respaldo portable"""
+    export_data = {}
+    
+    tables = ["programas", "convenios", "instituciones", "Profesionales", 
+              "pacientes", "registros", "viaticos", "agenda", "papeleria"]
+    
+    for table in tables:
+        try:
+            df = pd.read_sql_query(f"SELECT * FROM {table}", SQLITE_CONN)
+            export_data[table] = df.to_dict(orient='records')
+        except Exception as e:
+            export_data[table] = {"error": str(e)}
+    
+    export_data['metadata'] = {
+        'export_date': datetime.now().isoformat(),
+        'db_path': DB_SQLITE_PATH,
+        'app_version': '2.0'
+    }
+    
+    import json
+    return json.dumps(export_data, indent=2, default=str).encode('utf-8')
+
+# ---------------- UI MEJORADA DE RESPALDO CON PUNTOS DE RESTAURACIÓN ----------------
+def ui_respaldo():
+    st.subheader("🔄 Sistema de Respaldos y Restauración")
+    
+    # Verificar si existe la base de datos
+    if not os.path.exists(DB_SQLITE_PATH):
+        st.error(f"⚠️ **ALERTA: No se encuentra el archivo de base de datos: `{DB_SQLITE_PATH}`**")
+        st.warning("La base de datos no existe. Se creará una nueva al guardar datos.")
+        
+        if st.button("Crear base de datos vacía ahora", type="primary"):
+            global SQLITE_CONN, DATA
+            SQLITE_CONN = get_db_connection()
+            ensure_sqlite_schema()
+            DATA = DataAccess(SQLITE_CONN)
+            st.success("✅ Base de datos creada correctamente")
+            st.rerun()
+        return
+    
+    # Información de la base de datos actual
+    db_size = os.path.getsize(DB_SQLITE_PATH)
+    db_modified = datetime.fromtimestamp(os.path.getmtime(DB_SQLITE_PATH))
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Tamaño BD actual", f"{db_size / 1024:.1f} KB")
+    col2.metric("Última modificación", db_modified.strftime("%Y-%m-%d %H:%M"))
+    
+    try:
+        count = SQLITE_CONN.execute("SELECT COUNT(*) FROM registros").fetchone()[0]
+        col3.metric("Registros totales", f"{count:,}".replace(",", "."))
+    except:
+        col3.metric("Registros totales", "Error")
+    
+    st.markdown("---")
+    
+    # TABS PARA ORGANIZAR FUNCIONES
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📥 Descargar Respaldos", 
+        "📤 Restaurar desde Respaldo",
+        "🕐 Puntos de Restauración",
+        "⚙️ Configuración"
+    ])
+    
+    # ============ TAB 1: DESCARGAR RESPALDOS ============
+    with tab1:
+        st.markdown("### Descargar respaldo de la base de datos actual")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        # Respaldo .db
+        col1.download_button(
+            "💾 Descargar .DB",
+            data=backup_sqlite_file(),
+            file_name=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+            mime="application/octet-stream",
+            use_container_width=True,
+            help="Archivo SQLite completo"
+        )
+        
+        # Respaldo ZIP
+        col2.download_button(
+            "📦 Descargar ZIP",
+            data=build_zip_backup(),
+            file_name=f"backup_completo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+            mime="application/zip",
+            use_container_width=True,
+            help="ZIP con .db + CSV + schema"
+        )
+        
+        # Respaldo JSON
+        col3.download_button(
+            "📄 Descargar JSON",
+            data=export_data_to_json(),
+            file_name=f"backup_datos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            use_container_width=True,
+            help="Datos en formato JSON portable"
+        )
+        
+        st.markdown("---")
+        st.markdown("### Crear punto de restauración manual")
+        st.info("💡 Los puntos de restauración se guardan automáticamente en la carpeta `respaldos_automaticos/`")
+        
+        if st.button("📸 Crear Punto de Restauración Ahora", type="primary", use_container_width=True):
+            backup_path = create_automatic_backup(trigger="manual")
+            if backup_path:
+                st.success(f"✅ Punto de restauración creado: `{backup_path}`")
+                st.rerun()
+    
+    # ============ TAB 2: RESTAURAR DESDE ARCHIVO ============
+    with tab2:
+        st.markdown("### Restaurar base de datos desde archivo")
+        
+        uploaded_db = st.file_uploader(
+            "Selecciona un archivo .db para restaurar", 
+            type=["db"],
+            key="restore_upload"
+        )
+        
+        if uploaded_db is not None:
+            st.warning("⚠️ **ADVERTENCIA:** Esto sobrescribirá la base de datos actual")
+            st.info(f"📁 Archivo seleccionado: `{uploaded_db.name}` ({uploaded_db.size / 1024:.1f} KB)")
+            
+            col1, col2 = st.columns([1, 3])
+            
+            if col1.button("🔄 Restaurar Ahora", type="primary", use_container_width=True):
+                try:
+                    global SQLITE_CONN, DATA
+                    
+                    # Cerrar conexión
+                    try:
+                        SQLITE_CONN.close()
+                    except:
+                        pass
+                    
+                    # Crear respaldo de seguridad
+                    safety_backup = create_automatic_backup(trigger="before_restore")
+                    if safety_backup:
+                        st.info(f"✅ Respaldo de seguridad creado: `{os.path.basename(safety_backup)}`")
+                    
+                    # Escribir archivo subido
+                    with open(DB_SQLITE_PATH, "wb") as f:
+                        f.write(uploaded_db.getvalue())
+                    
+                    # Reconectar
+                    time.sleep(0.3)
+                    SQLITE_CONN = get_db_connection()
+                    DATA = DataAccess(SQLITE_CONN)
+                    
+                    # Verificar
+                    count = SQLITE_CONN.execute("SELECT COUNT(*) FROM registros").fetchone()[0]
+                    st.success(f"✅ Base restaurada correctamente. {count} registros encontrados.")
+                    
+                    time.sleep(2)
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"❌ Error restaurando: {e}")
+                    st.code(traceback.format_exc())
+    
+    # ============ TAB 3: PUNTOS DE RESTAURACIÓN AUTOMÁTICOS ============
+    with tab3:
+        st.markdown("### 🕐 Puntos de Restauración Disponibles")
+        st.caption(f"Los respaldos se guardan en: `{os.path.abspath(BACKUP_DIR)}/`")
+        
+        # Botón para crear respaldo manual en esta sección también
+        col1, col2, col3 = st.columns([2, 1, 1])
+        if col1.button("📸 Crear Punto de Restauración", use_container_width=True):
+            backup_path = create_automatic_backup(trigger="manual")
+            if backup_path:
+                st.success(f"✅ Creado: `{os.path.basename(backup_path)}`")
+                st.rerun()
+        
+        if col2.button("🔄 Actualizar", use_container_width=True):
+            st.rerun()
+        
+        # Listar respaldos disponibles
+        backups = list_available_backups()
+        
+        if not backups:
+            st.info("📭 No hay puntos de restauración guardados todavía.")
+            st.markdown("Los respaldos automáticos se crean:")
+            st.markdown("- Al iniciar la aplicación (cada hora)")
+            st.markdown("- Manualmente con el botón 'Crear Punto de Restauración'")
+            st.markdown("- Antes de operaciones críticas (restauraciones, reinicios)")
+        else:
+            st.success(f"📦 Se encontraron **{len(backups)}** puntos de restauración")
+            
+            # Mostrar tabla de respaldos
+            for idx, backup in enumerate(backups):
+                with st.expander(
+                    f"{'🟢' if idx == 0 else '🔵'} {backup['created'].strftime('%Y-%m-%d %H:%M:%S')} - "
+                    f"{backup['trigger'].upper()} - {backup['size'] / 1024:.1f} KB",
+                    expanded=(idx == 0)
+                ):
+                    col1, col2, col3 = st.columns([2, 1, 1])
+                    
+                    col1.write(f"**Archivo:** `{backup['filename']}`")
+                    col1.write(f"**Tamaño:** {backup['size'] / 1024:.1f} KB")
+                    col1.write(f"**Creado:** {backup['created'].strftime('%Y-%m-%d %H:%M:%S')}")
+                    col1.write(f"**Tipo:** {backup['trigger']}")
+                    
+                    # Botones de acción
+                    restore_key = f"restore_{idx}"
+                    download_key = f"download_{idx}"
+                    delete_key = f"delete_{idx}"
+                    
+                    if col2.button("🔄 Restaurar", key=restore_key, use_container_width=True):
+                        if restore_from_backup(backup['filepath']):
+                            time.sleep(2)
+                            st.rerun()
+                    
+                    # Botón de descarga
+                    with open(backup['filepath'], 'rb') as f:
+                        col2.download_button(
+                            "💾 Descargar",
+                            data=f.read(),
+                            file_name=backup['filename'],
+                            mime="application/octet-stream",
+                            key=download_key,
+                            use_container_width=True
+                        )
+                    
+                    if col3.button("🗑️ Eliminar", key=delete_key, use_container_width=True):
+                        if delete_backup(backup['filepath']):
+                            st.success(f"✅ Eliminado: {backup['filename']}")
+                            st.rerun()
+    
+    # ============ TAB 4: CONFIGURACIÓN ============
+    with tab4:
+        st.markdown("### ⚙️ Configuración de Respaldos")
+        
+        # Limpieza de respaldos antiguos
+        st.markdown("#### 🧹 Limpieza de Respaldos Antiguos")
+        keep_count = st.number_input(
+            "Mantener últimos N respaldos",
+            min_value=5,
+            max_value=100,
+            value=20,
+            step=5,
+            help="Los respaldos más antiguos serán eliminados"
+        )
+        
+        if st.button("🧹 Limpiar Respaldos Antiguos", use_container_width=True):
+            cleanup_old_backups(keep_last_n=keep_count)
+            st.rerun()
+        
+        st.markdown("---")
+        
+        # Reiniciar base de datos
+        st.markdown("#### ⚠️ Reiniciar Base de Datos (Destructivo)")
+        
+        with st.expander("🔴 Zona de Peligro - Reiniciar Base", expanded=False):
+            st.error("⚠️ **ADVERTENCIA:** Esta acción es irreversible si no tienes respaldos")
+            
+            # Crear respaldo antes de reiniciar
+            if st.button("📸 Crear Respaldo de Seguridad Antes de Continuar"):
+                backup_path = create_automatic_backup(trigger="before_reset")
+                if backup_path:
+                    st.success(f"✅ Respaldo creado: `{os.path.basename(backup_path)}`")
+            
+            metodo = st.radio(
+                "Método de reinicio",
+                ["Vaciar tablas (conservar archivo .db)", "Borrar archivo .db (recrear esquema en blanco)"],
+                index=0,
+            )
+            
+            confirma = st.text_input("Escribe exactamente: BORRAR TODO")
+            
+            if st.button("💥 REINICIAR BASE DE DATOS", type="primary"):
+                if confirma.strip() != "BORRAR TODO":
+                    st.error("❌ Debes escribir 'BORRAR TODO' exactamente para confirmar")
+                else:
+                    # Crear respaldo automático antes de reiniciar
+                    backup_path = create_automatic_backup(trigger="before_reset")
+                    if backup_path:
+                        st.info(f"✅ Respaldo automático creado: `{os.path.basename(backup_path)}`")
+                    
+                    m = "vaciar" if metodo.startswith("Vaciar") else "borrar_archivo"
+                    if _reset_database(m):
+                        st.success("✅ Base reiniciada correctamente")
+                        time.sleep(2)
+                        st.rerun()
+
+# Modificar ensure_session_state para incluir respaldo automático
+def ensure_session_state():
+    if "filters" not in st.session_state:
+        st.session_state.filters = {}
+    if "user" not in st.session_state:
+        st.session_state.user = None
+    if "role" not in st.session_state:
+        st.session_state.role = None
+    if "backup_done_this_session" not in st.session_state:
+        st.session_state.backup_done_this_session = False
+        # Crear respaldo automático al iniciar (solo una vez por sesión)
+        if not st.session_state.backup_done_this_session:
+            auto_backup_on_startup()
+            st.session_state.backup_done_this_session = True
+```
+
+## 📝 Instrucciones de Uso:
+
+### 1. **Reemplaza la función `ui_respaldo()` completa** con la nueva versión que incluye los 4 tabs
+
+### 2. **Añade las funciones nuevas** después de `build_zip_backup()`:
+- `ensure_backup_directory()`
+- `create_automatic_backup()`
+- `list_available_backups()`
+- `restore_from_backup()`
+- `delete_backup()`
+- `auto_backup_on_startup()`
+- `cleanup_old_backups()`
+- `export_data_to_json()`
+
+### 3. **Modifica `ensure_session_state()`** para incluir el respaldo automático
+
+## 🎯 Características del Sistema:
+
+✅ **Respaldos Automáticos:**
+- Al iniciar la app (cada hora)
+- Antes de restauraciones
+- Antes de reiniciar la BD
+
+✅ **Puntos de Restauración:**
+- Lista cronológica de todos los respaldos
+- Restaurar a cualquier punto en el tiempo
+- Descarga individual de respaldos
+
+✅ **Seguridad:**
+- Respaldo automático antes de operaciones destructivas
+- Mantiene un respaldo de seguridad al restaurar
+- Limpieza automática de respaldos antiguos
+
+✅ **Múltiples Formatos:**
+- .db (SQLite completo)
+- .zip (DB + CSV + schema)
+- .json (Datos portables)
+
+## 📁 Estructura de Respaldos:
+```
+tu_proyecto/
+├── app_productividad_Profesionales.py
+├── productividad_Profesionales.db  ← Base de datos actual
+└── respaldos_automaticos/           ← Carpeta de respaldos
+    ├── backup_auto_startup_20250128_080000.db
+    ├── backup_manual_20250128_100000.db
+    ├── backup_before_restore_20250128_120000.db
+    └── ...
 
 # ---------------- ESTADO / LOGIN ----------------
 def ensure_session_state():
@@ -3289,3 +3756,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
