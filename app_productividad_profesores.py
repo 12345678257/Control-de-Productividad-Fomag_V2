@@ -1,4 +1,1453 @@
-# ============ CONTINUACIÓN DEL CÓDIGO ============
+# app_productividad_Profesionales.py
+from datetime import datetime, date, time as dtime
+from typing import Optional, Dict, Any, List, Tuple
+import io
+import os
+import re
+import zipfile
+import unicodedata
+import sqlite3
+import traceback
+import time
+import shutil
+import json
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+APP_TITLE = "Productividad de Profesionales - FOMAG"
+APP_ICON = "📊"
+DB_SQLITE_PATH = "productividad_Profesionales.db"
+BACKUP_DIR = "respaldos_automaticos"
+
+ACTIVIDADES_PLANTILLAS = [
+    "VALORACION INICIAL POR PSICOLOGIA",
+    "CONTIGO PROFE EN AULA",
+    "PRIMEROS AUXILIOS PSICOLOGICO",
+    "APOYO TERAPEUTICO Y SEGUIMIENTO",
+]
+TIPOS_CONTACTO = ["Presencial", "Virtual", "Telefónico", "Otro"]
+
+# Orígenes para priorización (cuando se marca el check)
+PRIORI_ORIGEN_OPTS = [
+    "SG -SST FOMAG",
+    "Directivas del colegio",
+    "Psicólogo contigo profe en aula",
+]
+
+# Usuarios demo
+USERS = {
+    "admin": {"password": "admin123", "role": "admin"},
+    "pro": {"password": "pro123", "role": "profesional"},
+}
+
+st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
+
+# ---------------- LECTURA ROBUSTA CSV/EXCEL ----------------
+def _slug_col(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s).replace("\ufeff", "")  # BOM
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    return s.strip("_")
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [_slug_col(c) for c in df.columns]
+    synonyms = {
+        # generales
+        "num_documento": "documento",
+        "numero_documento": "documento",
+        "nro_documento": "documento",
+        "identificacion": "documento",
+        "identificación": "documento",
+        "cedula": "documento",
+        "c_c": "documento",
+        "nombre_completo": "nombre",
+        "correo": "email",
+        "correo_electronico": "email",
+        "telefono_contacto": "telefono",
+        "teléfono": "telefono",
+        "dirección": "direccion",
+        "fecha_de_nacimiento": "fecha_nacimiento",
+        "zona_geografica": "zona",
+        "actividad_plantilla": "actividad",
+        "duracion": "duracion_minutos",
+        "duracion_min": "duracion_minutos",
+        "atendio": "atendido",
+        "asistio": "atendido",
+
+        # atención registrada en Panacea (NO es el paciente)
+        "registrado_en_panacea": "registrado_panacea",
+        "en_panacea": "registrado_panacea",
+        "atencion_en_panacea": "registrado_panacea",
+        "atencion_registrada_panacea": "registrado_panacea",
+
+        # paciente creado en Panacea (nuevo)
+        "paciente_en_panacea": "paciente_creado_panacea",
+        "paciente_creado_panacea": "paciente_creado_panacea",
+        "creado_panacea": "paciente_creado_panacea",
+        "paciente_creado": "paciente_creado_panacea",
+
+        # priorización
+        "priorizado": "paciente_priorizado",
+        "es_priorizado": "paciente_priorizado",
+        "origen_priorizado": "priorizado_origen",
+    }
+    df = df.rename(columns={c: synonyms.get(c, c) for c in df.columns})
+
+    if "nombre" not in df.columns and ("nombres" in df.columns or "apellidos" in df.columns):
+        n = df["nombres"].astype(str) if "nombres" in df.columns else ""
+        a = df["apellidos"].astype(str) if "apellidos" in df.columns else ""
+        df["nombre"] = (n.fillna("") + " " + a.fillna("")).str.strip().replace("", pd.NA)
+
+    for key_col in ("documento", "nombre"):
+        if key_col in df.columns:
+            df[key_col] = (
+                df[key_col].astype(str).str.replace("\u200b", "", regex=False).str.strip()
+            )
+    return df
+
+def read_table_upload(uploaded_file) -> pd.DataFrame:
+    name = uploaded_file.name.lower()
+    raw = uploaded_file.getvalue()
+
+    if name.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(io.BytesIO(raw))
+        return normalize_columns(df)
+
+    last_err = None
+    encodings = ("utf-8", "utf-8-sig", "cp1252", "latin1")
+    seps = (None, ",", ";")
+    for enc in encodings:
+        for sep in seps:
+            try:
+                df = pd.read_csv(io.BytesIO(raw), encoding=enc, sep=sep, engine="python")
+                if df.shape[1] == 1 and sep is None:
+                    try:
+                        df2 = pd.read_csv(io.BytesIO(raw), encoding=enc, sep=";", engine="python")
+                        if df2.shape[1] > 1:
+                            df = df2
+                    except Exception:
+                        pass
+                return normalize_columns(df)
+            except Exception as e:
+                last_err = e
+
+    try:
+        txt = raw.decode("cp1252", errors="replace")
+        df = pd.read_csv(io.StringIO(txt), sep=None, engine="python")
+        return normalize_columns(df)
+    except Exception:
+        pass
+
+    raise last_err
+
+# ---------------- UTIL ----------------
+def _now() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+def success_toast(msg: str) -> None:
+    st.toast(msg, icon="✅")
+
+def warn_toast(msg: str) -> None:
+    st.toast(msg, icon="⚠️")
+
+def error_toast(msg: str) -> None:
+    st.toast(msg, icon="❌")
+
+def str2bool(x) -> Optional[bool]:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return None
+    s = str(x).strip().lower()
+    if s in ("si", "sí", "true", "1", "x", "si.", "sí."):
+        return True
+    if s in ("no", "false", "0", ""):
+        return False
+    return None
+
+def safe_int(x) -> Optional[int]:
+    try:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return None
+        return int(str(x).strip())
+    except Exception:
+        return None
+
+# ---------------- DB ----------------
+def get_db_connection() -> sqlite3.Connection:
+    """Obtiene una conexión fresca a la base de datos"""
+    if os.path.exists(DB_SQLITE_PATH):
+        conn = sqlite3.connect(DB_SQLITE_PATH, check_same_thread=False, timeout=10)
+    else:
+        conn = sqlite3.connect(DB_SQLITE_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
+
+SQLITE_CONN = get_db_connection()
+
+SQLITE_DDL = {
+    "programas": """
+    CREATE TABLE IF NOT EXISTS programas(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT UNIQUE NOT NULL,
+        activo INTEGER DEFAULT 1
+    );
+    """,
+    "convenios": """
+    CREATE TABLE IF NOT EXISTS convenios(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL,
+        programa_id INTEGER NOT NULL,
+        activo INTEGER DEFAULT 1,
+        UNIQUE(nombre, programa_id),
+        FOREIGN KEY(programa_id) REFERENCES programas(id)
+    );
+    """,
+    "instituciones": """
+    CREATE TABLE IF NOT EXISTS instituciones(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL,
+        localidad TEXT,
+        municipio TEXT,
+        departamento TEXT,
+        activo INTEGER DEFAULT 1,
+        UNIQUE(nombre, municipio, departamento)
+    );
+    """,
+    "Profesionales": """
+    CREATE TABLE IF NOT EXISTS Profesionales(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL,
+        documento TEXT,
+        email TEXT,
+        programa_id INTEGER,
+        convenio_id INTEGER,
+        zona TEXT,
+        activo INTEGER DEFAULT 1,
+        FOREIGN KEY(programa_id) REFERENCES programas(id),
+        FOREIGN KEY(convenio_id) REFERENCES convenios(id)
+    );
+    """,
+    "pacientes": """
+    CREATE TABLE IF NOT EXISTS pacientes(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        numero_documento TEXT UNIQUE NOT NULL,
+        nombre TEXT NOT NULL,
+        fecha_nacimiento TEXT,
+        sexo TEXT,
+        telefono TEXT,
+        email TEXT,
+        direccion TEXT,
+        localidad TEXT,
+        municipio TEXT,
+        departamento TEXT,
+        zona TEXT,
+        activo INTEGER DEFAULT 1
+    );
+    """,
+    "registros": """
+    CREATE TABLE IF NOT EXISTS registros(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT NOT NULL,
+        programa_id INTEGER NOT NULL,
+        convenio_id INTEGER NOT NULL,
+        institucion_id INTEGER NOT NULL,
+        Profesional_id INTEGER NOT NULL,
+        paciente_id INTEGER,
+        localidad TEXT,
+        municipio TEXT,
+        departamento TEXT,
+        numero_paciente TEXT,
+        nombre_paciente TEXT,
+        actividad TEXT,
+        atendido INTEGER,
+        registrado_panacea INTEGER,
+        paciente_creado_panacea INTEGER,
+        paciente_priorizado INTEGER,
+        priorizado_origen TEXT,
+        duracion_minutos INTEGER,
+        tipo_contacto TEXT,
+        pacientes_programados INTEGER NOT NULL,
+        pacientes_atendidos INTEGER NOT NULL,
+        observaciones TEXT,
+        creado_por TEXT,
+        creado_en TEXT,
+        actualizado_en TEXT,
+        FOREIGN KEY(programa_id) REFERENCES programas(id),
+        FOREIGN KEY(convenio_id) REFERENCES convenios(id),
+        FOREIGN KEY(institucion_id) REFERENCES instituciones(id),
+        FOREIGN KEY(Profesional_id) REFERENCES Profesionales(id),
+        FOREIGN KEY(paciente_id) REFERENCES pacientes(id)
+    );
+    """,
+    "viaticos": """
+    CREATE TABLE IF NOT EXISTS viaticos(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT NOT NULL,
+        programa_id INTEGER,
+        convenio_id INTEGER,
+        institucion_id INTEGER,
+        Profesional_id INTEGER,
+        requiere_viatico INTEGER NOT NULL,
+        origen TEXT,
+        destino TEXT,
+        valor REAL,
+        observaciones TEXT,
+        creado_por TEXT,
+        creado_en TEXT,
+        actualizado_en TEXT,
+        FOREIGN KEY(programa_id) REFERENCES programas(id),
+        FOREIGN KEY(convenio_id) REFERENCES convenios(id),
+        FOREIGN KEY(institucion_id) REFERENCES instituciones(id),
+        FOREIGN KEY(Profesional_id) REFERENCES Profesionales(id)
+    );
+    """,
+    "agenda": """
+    CREATE TABLE IF NOT EXISTS agenda(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT NOT NULL,
+        hora_inicio TEXT,
+        hora_fin TEXT,
+        titulo TEXT NOT NULL,
+        descripcion TEXT,
+        programa_id INTEGER,
+        convenio_id INTEGER,
+        institucion_id INTEGER,
+        Profesional_id INTEGER,
+        creado_por TEXT,
+        creado_en TEXT,
+        actualizado_en TEXT,
+        FOREIGN KEY(programa_id) REFERENCES programas(id),
+        FOREIGN KEY(convenio_id) REFERENCES convenios(id),
+        FOREIGN KEY(institucion_id) REFERENCES instituciones(id),
+        FOREIGN KEY(Profesional_id) REFERENCES Profesionales(id)
+    );
+    """,
+    "papeleria": """
+    CREATE TABLE IF NOT EXISTS papeleria(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT NOT NULL,
+        programa_id INTEGER,
+        convenio_id INTEGER,
+        institucion_id INTEGER,
+        Profesional_id INTEGER,
+        item TEXT NOT NULL,
+        cantidad INTEGER,
+        estado TEXT,
+        observaciones TEXT,
+        creado_por TEXT,
+        creado_en TEXT,
+        actualizado_en TEXT,
+        FOREIGN KEY(programa_id) REFERENCES programas(id),
+        FOREIGN KEY(convenio_id) REFERENCES convenios(id),
+        FOREIGN KEY(institucion_id) REFERENCES instituciones(id),
+        FOREIGN KEY(Profesional_id) REFERENCES Profesionales(id)
+    );
+    """,
+}
+
+def ensure_sqlite_schema():
+    with SQLITE_CONN:
+        for ddl in SQLITE_DDL.values():
+            SQLITE_CONN.execute(ddl)
+        # Migraciones suaves
+        cur = SQLITE_CONN.execute("PRAGMA table_info(registros);")
+        have = {r["name"] for r in cur.fetchall()}
+        add_cols = {
+            "numero_paciente": "ALTER TABLE registros ADD COLUMN numero_paciente TEXT;",
+            "nombre_paciente": "ALTER TABLE registros ADD COLUMN nombre_paciente TEXT;",
+            "actividad": "ALTER TABLE registros ADD COLUMN actividad TEXT;",
+            "atendido": "ALTER TABLE registros ADD COLUMN atendido INTEGER;",
+            "registrado_panacea": "ALTER TABLE registros ADD COLUMN registrado_panacea INTEGER;",
+            "paciente_creado_panacea": "ALTER TABLE registros ADD COLUMN paciente_creado_panacea INTEGER;",
+            "paciente_priorizado": "ALTER TABLE registros ADD COLUMN paciente_priorizado INTEGER;",
+            "priorizado_origen": "ALTER TABLE registros ADD COLUMN priorizado_origen TEXT;",
+            "duracion_minutos": "ALTER TABLE registros ADD COLUMN duracion_minutos INTEGER;",
+            "tipo_contacto": "ALTER TABLE registros ADD COLUMN tipo_contacto TEXT;",
+            "paciente_id": "ALTER TABLE registros ADD COLUMN paciente_id INTEGER;",
+        }
+        for c, stmt in add_cols.items():
+            if c not in have:
+                SQLITE_CONN.execute(stmt)
+
+ensure_sqlite_schema()
+
+# ---------------- DAO ----------------
+class DataAccess:
+    def __init__(self, conn: sqlite3.Connection):
+        self.db = conn
+
+    # Helpers name->id
+    def programa_id_by_name(self, nombre: str) -> Optional[int]:
+        if not nombre:
+            return None
+        r = self.db.execute("SELECT id FROM programas WHERE nombre=? AND activo=1", (nombre,)).fetchone()
+        return int(r["id"]) if r else None
+
+    def convenio_id_by_name(self, nombre: str, programa_id: Optional[int]) -> Optional[int]:
+        if not nombre or not programa_id:
+            return None
+        r = self.db.execute(
+            "SELECT id FROM convenios WHERE nombre=? AND programa_id=? AND activo=1",
+            (nombre, programa_id),
+        ).fetchone()
+        return int(r["id"]) if r else None
+
+    def institucion_id_by_name_geo(
+        self, nombre: str, municipio: Optional[str], departamento: Optional[str]
+    ) -> Optional[int]:
+        if not nombre:
+            return None
+        if municipio and departamento:
+            r = self.db.execute(
+                "SELECT id FROM instituciones WHERE nombre=? AND municipio=? AND departamento=? AND activo=1",
+                (nombre, municipio, departamento),
+            ).fetchone()
+            if r:
+                return int(r["id"])
+        r = self.db.execute(
+            "SELECT id FROM instituciones WHERE nombre=? AND activo=1 ORDER BY id ASC",
+            (nombre,),
+        ).fetchone()
+        return int(r["id"]) if r else None
+
+    def Profesional_id_by_name(
+        self, nombre: str, programa_id: Optional[int], convenio_id: Optional[int]
+    ) -> Optional[int]:
+        if not nombre:
+            return None
+        r = self.db.execute(
+            "SELECT id FROM Profesionales WHERE nombre=? AND activo=1 ORDER BY id ASC",
+            (nombre,),
+        ).fetchone()
+        return int(r["id"]) if r else None
+
+    # CRUD PROGRAMAS
+    def list_programas(self) -> pd.DataFrame:
+        return pd.read_sql_query("SELECT * FROM programas WHERE activo=1 ORDER BY nombre", self.db)
+
+    def upsert_programa(self, nombre: str) -> int:
+        if not nombre:
+            return None
+        with self.db:
+            self.db.execute("INSERT OR IGNORE INTO programas(nombre,activo) VALUES(?,1)", (nombre.strip(),))
+        r = self.db.execute("SELECT id FROM programas WHERE nombre=?", (nombre.strip(),)).fetchone()
+        return int(r["id"])
+
+    def get_programa_by_id(self, pid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM programas WHERE id=?", (pid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_programa(self, pid: int, nombre: str) -> None:
+        with self.db:
+            self.db.execute("UPDATE programas SET nombre=? WHERE id=?", (nombre.strip(), pid))
+
+    def delete_programa(self, pid: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE programas SET activo=0 WHERE id=?", (pid,))
+
+    # CRUD CONVENIOS
+    def list_convenios(self, programa_id: Optional[int] = None) -> pd.DataFrame:
+        q = "SELECT * FROM convenios WHERE activo=1"
+        p: List[Any] = []
+        if programa_id:
+            q += " AND programa_id=?"
+            p.append(programa_id)
+        q += " ORDER BY nombre"
+        return pd.read_sql_query(q, self.db, params=p)
+
+    def upsert_convenio(self, nombre: str, programa_id: int) -> int:
+        if not (nombre and programa_id):
+            return None
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO convenios(nombre,programa_id,activo) VALUES(?,?,1)",
+                (nombre.strip(), programa_id),
+            )
+        r = self.db.execute(
+            "SELECT id FROM convenios WHERE nombre=? AND programa_id=?", (nombre.strip(), programa_id)
+        ).fetchone()
+        return int(r["id"])
+
+    def get_convenio_by_id(self, cid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM convenios WHERE id=?", (cid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_convenio(self, cid: int, nombre: str, programa_id: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE convenios SET nombre=?, programa_id=? WHERE id=?", (nombre.strip(), programa_id, cid))
+
+    def delete_convenio(self, cid: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE convenios SET activo=0 WHERE id=?", (cid,))
+
+    # CRUD INSTITUCIONES
+    def list_instituciones(self) -> pd.DataFrame:
+        return pd.read_sql_query(
+            "SELECT * FROM instituciones WHERE activo=1 ORDER BY departamento, municipio, nombre", self.db
+        )
+
+    def upsert_institucion(
+        self, nombre: str, localidad: Optional[str], municipio: Optional[str], departamento: Optional[str]
+    ) -> int:
+        if not nombre:
+            return None
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO instituciones(nombre,localidad,municipio,departamento,activo) VALUES(?,?,?,?,1)",
+                (nombre.strip(), (localidad or None), (municipio or None), (departamento or None)),
+            )
+        r = self.db.execute(
+            "SELECT id FROM instituciones WHERE nombre=? ORDER BY id ASC", (nombre.strip(),)
+        ).fetchone()
+        return int(r["id"])
+
+    def get_institucion_by_id(self, iid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM instituciones WHERE id=?", (iid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_institucion(self, iid: int, nombre: str, localidad: Optional[str], municipio: Optional[str], departamento: Optional[str]) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE instituciones SET nombre=?, localidad=?, municipio=?, departamento=? WHERE id=?",
+                (nombre.strip(), localidad, municipio, departamento, iid)
+            )
+
+    def delete_institucion(self, iid: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE instituciones SET activo=0 WHERE id=?", (iid,))
+
+    # CRUD PROFESIONALES
+    def list_Profesionales(
+        self, programa_id: Optional[int] = None, convenio_id: Optional[int] = None
+    ) -> pd.DataFrame:
+        q = "SELECT * FROM Profesionales WHERE activo=1"
+        p: List[Any] = []
+        if programa_id:
+            q += " AND programa_id=?"
+            p.append(programa_id)
+        if convenio_id:
+            q += " AND convenio_id=?"
+            p.append(convenio_id)
+        q += " ORDER BY nombre"
+        return pd.read_sql_query(q, self.db, params=p)
+
+    def upsert_Profesional(
+        self,
+        nombre: str,
+        documento: Optional[str],
+        email: Optional[str],
+        programa_id: Optional[int],
+        convenio_id: Optional[int],
+        zona: Optional[str],
+    ) -> int:
+        if not nombre:
+            return None
+        with self.db:
+            self.db.execute(
+                "INSERT INTO Profesionales(nombre,documento,email,programa_id,convenio_id,zona,activo) VALUES(?,?,?,?,?,?,1)",
+                (nombre.strip(), (documento or None), (email or None), programa_id, convenio_id, zona),
+            )
+        r = self.db.execute(
+            "SELECT id FROM Profesionales WHERE nombre=? ORDER BY id DESC", (nombre.strip(),)
+        ).fetchone()
+        return int(r["id"])
+
+    def get_profesional_by_id(self, fid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM Profesionales WHERE id=?", (fid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_profesional(self, fid: int, nombre: str, documento: Optional[str], email: Optional[str], 
+                          programa_id: Optional[int], convenio_id: Optional[int], zona: Optional[str]) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE Profesionales SET nombre=?, documento=?, email=?, programa_id=?, convenio_id=?, zona=? WHERE id=?",
+                (nombre.strip(), documento, email, programa_id, convenio_id, zona, fid)
+            )
+
+    def delete_profesional(self, fid: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE Profesionales SET activo=0 WHERE id=?", (fid,))
+
+    # CRUD PACIENTES
+    def list_pacientes(self) -> pd.DataFrame:
+        return pd.read_sql_query("SELECT * FROM pacientes WHERE activo=1 ORDER BY nombre", self.db)
+
+    def get_paciente_por_documento(self, doc: str) -> Optional[Dict[str, Any]]:
+        doc = (doc or "").strip()
+        if not doc:
+            return None
+        row = self.db.execute("SELECT * FROM pacientes WHERE numero_documento=? AND activo=1", (doc,)).fetchone()
+        return dict(row) if row else None
+
+    def get_paciente_by_id(self, pid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM pacientes WHERE id=?", (pid,)).fetchone()
+        return dict(r) if r else None
+
+    def upsert_paciente(
+        self,
+        numero_documento: str,
+        nombre: str,
+        fecha_nacimiento=None,
+        sexo=None,
+        telefono=None,
+        email=None,
+        direccion=None,
+        localidad=None,
+        municipio=None,
+        departamento=None,
+        zona=None,
+    ) -> int:
+        numero_documento = (numero_documento or "").strip()
+        nombre = (nombre or "").strip()
+        if not numero_documento or not nombre:
+            raise ValueError("Documento y nombre del paciente son obligatorios")
+        row = self.db.execute("SELECT id FROM pacientes WHERE numero_documento=?", (numero_documento,)).fetchone()
+        if row:
+            pid = int(row["id"])
+            with self.db:
+                self.db.execute(
+                    """UPDATE pacientes
+                       SET nombre=?, fecha_nacimiento=?, sexo=?, telefono=?, email=?,
+                           direccion=?, localidad=?, municipio=?, departamento=?, zona=?
+                     WHERE id=?""",
+                    (
+                        nombre,
+                        fecha_nacimiento,
+                        sexo,
+                        telefono,
+                        email,
+                        direccion,
+                        localidad,
+                        municipio,
+                        departamento,
+                        zona,
+                        pid,
+                    ),
+                )
+            return pid
+        with self.db:
+            cur = self.db.execute(
+                """INSERT INTO pacientes(
+                       numero_documento, nombre, fecha_nacimiento, sexo, telefono, email,
+                       direccion, localidad, municipio, departamento, zona, activo
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)""",
+                (
+                    numero_documento,
+                    nombre,
+                    fecha_nacimiento,
+                    sexo,
+                    telefono,
+                    email,
+                    direccion,
+                    localidad,
+                    municipio,
+                    departamento,
+                    zona,
+                ),
+            )
+        return int(cur.lastrowid)
+
+    def delete_paciente(self, pid: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE pacientes SET activo=0 WHERE id=?", (pid,))
+
+    # CRUD REGISTROS
+    def insert_registro(
+        self,
+        fecha: date,
+        programa_id: int,
+        convenio_id: int,
+        institucion_id: int,
+        Profesional_id: int,
+        paciente_id: Optional[int],
+        localidad,
+        municipio,
+        departamento,
+        numero_paciente,
+        nombre_paciente,
+        actividad,
+        atendido,
+        registrado_panacea,
+        paciente_creado_panacea,
+        paciente_priorizado,
+        priorizado_origen,
+        duracion_minutos,
+        tipo_contacto,
+        observaciones,
+        creado_por,
+    ) -> None:
+        row = {
+            "fecha": fecha.strftime("%Y-%m-%d") if isinstance(fecha, date) else str(fecha),
+            "programa_id": programa_id,
+            "convenio_id": convenio_id,
+            "institucion_id": institucion_id,
+            "Profesional_id": Profesional_id,
+            "paciente_id": paciente_id,
+            "localidad": localidad,
+            "municipio": municipio,
+            "departamento": departamento,
+            "numero_paciente": (numero_paciente or "").strip() or None,
+            "nombre_paciente": (nombre_paciente or "").strip() or None,
+            "actividad": actividad,
+            "atendido": 1 if atendido else 0,
+            "registrado_panacea": 1 if registrado_panacea else 0,
+            "paciente_creado_panacea": 1 if paciente_creado_panacea else 0,
+            "paciente_priorizado": 1 if paciente_priorizado else 0,
+            "priorizado_origen": priorizado_origen,
+            "duracion_minutos": int(duracion_minutos) if duracion_minutos is not None else None,
+            "tipo_contacto": tipo_contacto,
+            "pacientes_programados": 1,
+            "pacientes_atendidos": 1 if atendido else 0,
+            "observaciones": observaciones,
+            "creado_por": creado_por,
+            "creado_en": _now(),
+            "actualizado_en": _now(),
+        }
+        cols = ",".join(row.keys())
+        ph = ",".join(["?"] * len(row))
+        with self.db:
+            self.db.execute(f"INSERT INTO registros ({cols}) VALUES ({ph})", tuple(row.values()))
+
+    def list_registros(self, filtros: Dict[str, Any]) -> pd.DataFrame:
+        q = (
+            "SELECT r.*, p.nombre AS programa, c.nombre AS convenio, "
+            "i.nombre AS institucion, f.nombre AS Profesional, f.email AS Profesional_email "
+            "FROM registros r "
+            "LEFT JOIN programas p ON p.id=r.programa_id "
+            "LEFT JOIN convenios c ON c.id=r.convenio_id "
+            "LEFT JOIN instituciones i ON i.id=r.institucion_id "
+            "LEFT JOIN Profesionales f ON f.id=r.Profesional_id "
+            "WHERE 1=1 "
+        )
+        params: List[Any] = []
+        if filtros.get("fecha_desde"):
+            q += " AND date(r.fecha)>=date(?)"
+            params.append(filtros["fecha_desde"].strftime("%Y-%m-%d"))
+        if filtros.get("fecha_hasta"):
+            q += " AND date(r.fecha)<=date(?)"
+            params.append(filtros["fecha_hasta"].strftime("%Y-%m-%d"))
+        for k in ["programa_id", "convenio_id", "Profesional_id"]:
+            if filtros.get(k):
+                q += f" AND r.{k}=?"
+                params.append(filtros[k])
+        if filtros.get("actividad"):
+            q += " AND r.actividad=?"
+            params.append(filtros["actividad"])
+        q += " ORDER BY r.fecha DESC, r.id DESC"
+
+        df = pd.read_sql_query(q, self.db, params=params)
+        if not df.empty:
+            df["pacientes_programados"] = df["pacientes_programados"].fillna(0)
+            df["pacientes_atendidos"] = df["pacientes_atendidos"].fillna(0)
+            df["no_asistieron"] = df["pacientes_programados"] - df["pacientes_atendidos"]
+            df["tasa_atencion"] = np.where(
+                df["pacientes_programados"] > 0,
+                df["pacientes_atendidos"] / df["pacientes_programados"],
+                np.nan,
+            )
+        return df
+
+    def delete_registro(self, rid: int) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM registros WHERE id=?", (rid,))
+
+    def update_registro(self, rid: int, updates: Dict[str, Any]) -> None:
+        updates = dict(updates)
+        updates["actualizado_en"] = _now()
+        sets = ",".join([f"{k}=?" for k in updates.keys()])
+        with self.db:
+            self.db.execute(f"UPDATE registros SET {sets} WHERE id=?", (*updates.values(), rid))
+
+    # CRUD VIATICOS
+    def insert_viatico(
+        self,
+        fecha: date,
+        programa_id,
+        convenio_id,
+        institucion_id,
+        Profesional_id,
+        requiere_viatico,
+        origen,
+        destino,
+        valor,
+        observaciones,
+        creado_por,
+    ) -> None:
+        row = {
+            "fecha": fecha.strftime("%Y-%m-%d"),
+            "programa_id": programa_id,
+            "convenio_id": convenio_id,
+            "institucion_id": institucion_id,
+            "Profesional_id": Profesional_id,
+            "requiere_viatico": 1 if requiere_viatico else 0,
+            "origen": origen,
+            "destino": destino,
+            "valor": float(valor) if valor is not None else None,
+            "observaciones": observaciones,
+            "creado_por": creado_por,
+            "creado_en": _now(),
+            "actualizado_en": _now(),
+        }
+        cols = ",".join(row.keys())
+        ph = ",".join(["?"] * len(row))
+        with self.db:
+            self.db.execute(f"INSERT INTO viaticos ({cols}) VALUES ({ph})", tuple(row.values()))
+
+    def list_viaticos(self, filtros: Dict[str, Any]) -> pd.DataFrame:
+        q = (
+            "SELECT v.*, p.nombre AS programa, c.nombre AS convenio, "
+            "i.nombre AS institucion, f.nombre AS Profesional "
+            "FROM viaticos v "
+            "LEFT JOIN programas p ON p.id=v.programa_id "
+            "LEFT JOIN convenios c ON c.id=v.convenio_id "
+            "LEFT JOIN instituciones i ON i.id=v.institucion_id "
+            "LEFT JOIN Profesionales f ON f.id=v.Profesional_id "
+            "WHERE 1=1 "
+        )
+        params: List[Any] = []
+        if filtros.get("fecha_desde"):
+            q += " AND date(v.fecha)>=date(?)"
+            params.append(filtros["fecha_desde"].strftime("%Y-%m-%d"))
+        if filtros.get("fecha_hasta"):
+            q += " AND date(v.fecha)<=date(?)"
+            params.append(filtros["fecha_hasta"].strftime("%Y-%m-%d"))
+        for k in ["programa_id", "convenio_id", "Profesional_id"]:
+            if filtros.get(k):
+                q += f" AND v.{k}=?"
+                params.append(filtros[k])
+        q += " ORDER BY v.fecha DESC, v.id DESC"
+        return pd.read_sql_query(q, self.db, params=params)
+
+    def get_viatico_by_id(self, vid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM viaticos WHERE id=?", (vid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_viatico(self, vid: int, updates: Dict[str, Any]) -> None:
+        updates = dict(updates)
+        updates["actualizado_en"] = _now()
+        sets = ",".join([f"{k}=?" for k in updates.keys()])
+        with self.db:
+            self.db.execute(f"UPDATE viaticos SET {sets} WHERE id=?", (*updates.values(), vid))
+
+    def delete_viatico(self, vid: int) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM viaticos WHERE id=?", (vid,))
+
+    # CRUD AGENDA
+    def insert_agenda_event(
+        self,
+        fecha: date,
+        hi: Optional[dtime],
+        hf: Optional[dtime],
+        titulo: str,
+        descripcion,
+        programa_id,
+        convenio_id,
+        institucion_id,
+        Profesional_id,
+        creado_por,
+    ) -> None:
+        row = {
+            "fecha": fecha.strftime("%Y-%m-%d"),
+            "hora_inicio": hi.strftime("%H:%M") if hi else None,
+            "hora_fin": hf.strftime("%H:%M") if hf else None,
+            "titulo": titulo.strip(),
+            "descripcion": descripcion,
+            "programa_id": programa_id,
+            "convenio_id": convenio_id,
+            "institucion_id": institucion_id,
+            "Profesional_id": Profesional_id,
+            "creado_por": creado_por,
+            "creado_en": _now(),
+            "actualizado_en": _now(),
+        }
+        cols = ",".join(row.keys())
+        ph = ",".join(["?"] * len(row))
+        with self.db:
+            self.db.execute(f"INSERT INTO agenda ({cols}) VALUES ({ph})", tuple(row.values()))
+
+    def list_agenda(self, filtros: Dict[str, Any]) -> pd.DataFrame:
+        q = (
+            "SELECT a.*, p.nombre AS programa, c.nombre AS convenio, "
+            "i.nombre AS institucion, f.nombre AS Profesional "
+            "FROM agenda a "
+            "LEFT JOIN programas p ON p.id=a.programa_id "
+            "LEFT JOIN convenios c ON c.id=a.convenio_id "
+            "LEFT JOIN instituciones i ON i.id=a.institucion_id "
+            "LEFT JOIN Profesionales f ON f.id=a.Profesional_id "
+            "WHERE 1=1 "
+        )
+        params: List[Any] = []
+        if filtros.get("fecha_desde"):
+            q += " AND date(a.fecha)>=date(?)"
+            params.append(filtros["fecha_desde"].strftime("%Y-%m-%d"))
+        if filtros.get("fecha_hasta"):
+            q += " AND date(a.fecha)<=date(?)"
+            params.append(filtros["fecha_hasta"].strftime("%Y-%m-%d"))
+        for k in ["programa_id", "convenio_id", "Profesional_id"]:
+            if filtros.get(k):
+                q += f" AND a.{k}=?"
+                params.append(filtros[k])
+        q += " ORDER BY a.fecha ASC, a.hora_inicio ASC"
+        return pd.read_sql_query(q, self.db, params=params)
+
+    def get_agenda_by_id(self, eid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM agenda WHERE id=?", (eid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_agenda_event(self, eid: int, updates: Dict[str, Any]) -> None:
+        updates = dict(updates)
+        updates["actualizado_en"] = _now()
+        sets = ",".join([f"{k}=?" for k in updates.keys()])
+        with self.db:
+            self.db.execute(f"UPDATE agenda SET {sets} WHERE id=?", (*updates.values(), eid))
+
+    def delete_agenda_event(self, eid: int) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM agenda WHERE id=?", (eid,))
+
+    # CRUD PAPELERIA
+    def insert_papeleria(
+        self,
+        fecha: date,
+        programa_id,
+        convenio_id,
+        institucion_id,
+        Profesional_id,
+        item: str,
+        cantidad: Optional[int],
+        estado: str,
+        observaciones: Optional[str],
+        creado_por: str,
+    ) -> None:
+        row = {
+            "fecha": fecha.strftime("%Y-%m-%d"),
+            "programa_id": programa_id,
+            "convenio_id": convenio_id,
+            "institucion_id": institucion_id,
+            "Profesional_id": Profesional_id,
+            "item": item.strip(),
+            "cantidad": cantidad,
+            "estado": estado,
+            "observaciones": observaciones,
+            "creado_por": creado_por,
+            "creado_en": _now(),
+            "actualizado_en": _now(),
+        }
+        cols = ",".join(row.keys())
+        ph = ",".join(["?"] * len(row))
+        with self.db:
+            self.db.execute(f"INSERT INTO papeleria ({cols}) VALUES ({ph})", tuple(row.values()))
+
+    def list_papeleria(self, filtros: Dict[str, Any]) -> pd.DataFrame:
+        q = (
+            "SELECT pa.*, p.nombre AS programa, c.nombre AS convenio, "
+            "i.nombre AS institucion, f.nombre AS Profesional "
+            "FROM papeleria pa "
+            "LEFT JOIN programas p ON p.id=pa.programa_id "
+            "LEFT JOIN convenios c ON c.id=pa.convenio_id "
+            "LEFT JOIN instituciones i ON i.id=pa.institucion_id "
+            "LEFT JOIN Profesionales f ON f.id=pa.Profesional_id "
+            "WHERE 1=1 "
+        )
+        params: List[Any] = []
+        if filtros.get("fecha_desde"):
+            q += " AND date(pa.fecha)>=date(?)"
+            params.append(filtros["fecha_desde"].strftime("%Y-%m-%d"))
+        if filtros.get("fecha_hasta"):
+            q += " AND date(pa.fecha)<=date(?)"
+            params.append(filtros["fecha_hasta"].strftime("%Y-%m-%d"))
+        for k in ["programa_id", "convenio_id", "Profesional_id"]:
+            if filtros.get(k):
+                q += f" AND pa.{k}=?"
+                params.append(filtros[k])
+        q += " ORDER BY pa.fecha DESC, pa.id DESC"
+        return pd.read_sql_query(q, self.db, params=params)
+
+    def get_papeleria_by_id(self, pid: int) -> Optional[Dict[str, Any]]:
+        r = self.db.execute("SELECT * FROM papeleria WHERE id=?", (pid,)).fetchone()
+        return dict(r) if r else None
+
+    def update_papeleria(self, pid: int, updates: Dict[str, Any]) -> None:
+        updates = dict(updates)
+        updates["actualizado_en"] = _now()
+        sets = ",".join([f"{k}=?" for k in updates.keys()])
+        with self.db:
+            self.db.execute(f"UPDATE papeleria SET {sets} WHERE id=?", (*updates.values(), pid))
+
+    def delete_papeleria(self, pid: int) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM papeleria WHERE id=?", (pid,))
+
+DATA = DataAccess(SQLITE_CONN)
+
+# ---------------- BACKUP HELPERS ----------------
+def backup_sqlite_file() -> bytes:
+    try:
+        SQLITE_CONN.commit()
+    except Exception:
+        pass
+    with open(DB_SQLITE_PATH, "rb") as f:
+        return f.read()
+
+def build_zip_backup() -> bytes:
+    try:
+        SQLITE_CONN.commit()
+    except Exception:
+        pass
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        # DB
+        if os.path.exists(DB_SQLITE_PATH):
+            z.writestr(os.path.basename(DB_SQLITE_PATH), backup_sqlite_file())
+        # CSV de tablas
+        tbls = pd.read_sql_query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            SQLITE_CONN,
+        )
+        for t in tbls["name"].tolist():
+            try:
+                df = pd.read_sql_query(f"SELECT * FROM {t}", SQLITE_CONN)
+                z.writestr(f"csv/{t}.csv", df.to_csv(index=False))
+            except Exception as e:
+                z.writestr(f"csv/{t}_ERROR.txt", f"No se pudo exportar {t}: {e}")
+        # schema
+        try:
+            ddl_joined = "\n\n".join(SQLITE_DDL.values())
+            z.writestr("schema.sql", ddl_joined)
+        except Exception:
+            pass
+    buf.seek(0)
+    return buf.getvalue()
+
+# ---------------- SISTEMA DE RESPALDOS AUTOMÁTICOS ----------------
+def ensure_backup_directory():
+    """Crea el directorio de respaldos si no existe"""
+    if not os.path.exists(BACKUP_DIR):
+        os.makedirs(BACKUP_DIR)
+
+def create_automatic_backup(trigger: str = "manual") -> str:
+    """
+    Crea un respaldo automático con timestamp
+    trigger: 'manual', 'auto_startup', 'before_restore', 'before_reset'
+    """
+    ensure_backup_directory()
+    
+    if not os.path.exists(DB_SQLITE_PATH):
+        return None
+    
+    try:
+        SQLITE_CONN.commit()
+    except:
+        pass
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_filename = f"backup_{trigger}_{timestamp}.db"
+    backup_path = os.path.join(BACKUP_DIR, backup_filename)
+    
+    try:
+        shutil.copy2(DB_SQLITE_PATH, backup_path)
+        return backup_path
+    except Exception as e:
+        st.error(f"Error creando respaldo: {e}")
+        return None
+
+def list_available_backups() -> List[Dict[str, Any]]:
+    """Lista todos los respaldos disponibles con información"""
+    ensure_backup_directory()
+    
+    backups = []
+    if os.path.exists(BACKUP_DIR):
+        for filename in os.listdir(BACKUP_DIR):
+            if filename.endswith('.db'):
+                filepath = os.path.join(BACKUP_DIR, filename)
+                file_stat = os.stat(filepath)
+                
+                # Extraer información del nombre del archivo
+                # Formato: backup_trigger_YYYYMMDD_HHMMSS.db
+                parts = filename.replace('.db', '').split('_')
+                
+                backups.append({
+                    'filename': filename,
+                    'filepath': filepath,
+                    'size': file_stat.st_size,
+                    'created': datetime.fromtimestamp(file_stat.st_mtime),
+                    'trigger': parts[1] if len(parts) > 1 else 'unknown',
+                })
+    
+    # Ordenar por fecha de creación (más reciente primero)
+    backups.sort(key=lambda x: x['created'], reverse=True)
+    return backups
+
+def restore_from_backup(backup_path: str) -> bool:
+    """Restaura la base de datos desde un respaldo específico"""
+    global SQLITE_CONN, DATA
+    
+    if not os.path.exists(backup_path):
+        st.error(f"El respaldo no existe: {backup_path}")
+        return False
+    
+    try:
+        # Crear respaldo de seguridad de la BD actual
+        if os.path.exists(DB_SQLITE_PATH):
+            safety_backup = create_automatic_backup(trigger="before_restore")
+            if safety_backup:
+                st.info(f"✅ Respaldo de seguridad creado: `{os.path.basename(safety_backup)}`")
+        
+        # Cerrar conexión actual
+        try:
+            SQLITE_CONN.close()
+        except:
+            pass
+        
+        # Restaurar desde el respaldo seleccionado
+        shutil.copy2(backup_path, DB_SQLITE_PATH)
+        
+        # Reconectar
+        time.sleep(0.3)
+        SQLITE_CONN = get_db_connection()
+        DATA = DataAccess(SQLITE_CONN)
+        
+        # Verificar
+        count = SQLITE_CONN.execute("SELECT COUNT(*) FROM registros").fetchone()[0]
+        st.success(f"✅ Base restaurada correctamente desde: `{os.path.basename(backup_path)}`")
+        st.info(f"📊 {count} registros encontrados en la base restaurada")
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"❌ Error restaurando: {e}")
+        st.code(traceback.format_exc())
+        return False
+
+def delete_backup(backup_path: str) -> bool:
+    """Elimina un respaldo específico"""
+    try:
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
+            return True
+        return False
+    except Exception as e:
+        st.error(f"Error eliminando respaldo: {e}")
+        return False
+
+def auto_backup_on_startup():
+    """Crea un respaldo automático al iniciar la aplicación"""
+    if os.path.exists(DB_SQLITE_PATH):
+        # Solo crear respaldo si han pasado más de 1 hora desde el último
+        ensure_backup_directory()
+        backups = list_available_backups()
+        
+        should_backup = True
+        if backups:
+            last_backup_time = backups[0]['created']
+            hours_since_last = (datetime.now() - last_backup_time).total_seconds() / 3600
+            should_backup = hours_since_last >= 1
+        
+        if should_backup:
+            backup_path = create_automatic_backup(trigger="auto_startup")
+            if backup_path:
+                pass  # Silencioso, no mostrar mensaje
+
+def cleanup_old_backups(keep_last_n: int = 20):
+    """Limpia respaldos antiguos manteniendo solo los últimos N"""
+    backups = list_available_backups()
+    
+    if len(backups) > keep_last_n:
+        to_delete = backups[keep_last_n:]
+        deleted = 0
+        for backup in to_delete:
+            if delete_backup(backup['filepath']):
+                deleted += 1
+        
+        if deleted > 0:
+            st.info(f"🧹 Se eliminaron {deleted} respaldos antiguos (manteniendo los últimos {keep_last_n})")
+
+def export_data_to_json() -> bytes:
+    """Exporta todos los datos a formato JSON para respaldo portable"""
+    export_data = {}
+    
+    tables = ["programas", "convenios", "instituciones", "Profesionales", 
+              "pacientes", "registros", "viaticos", "agenda", "papeleria"]
+    
+    for table in tables:
+        try:
+            df = pd.read_sql_query(f"SELECT * FROM {table}", SQLITE_CONN)
+            export_data[table] = df.to_dict(orient='records')
+        except Exception as e:
+            export_data[table] = {"error": str(e)}
+    
+    export_data['metadata'] = {
+        'export_date': datetime.now().isoformat(),
+        'db_path': DB_SQLITE_PATH,
+        'app_version': '2.0'
+    }
+    
+    return json.dumps(export_data, indent=2, default=str).encode('utf-8')
+
+# ---------------- ESTADO / LOGIN ----------------
+def ensure_session_state():
+    if "filters" not in st.session_state:
+        st.session_state.filters = {}
+    if "user" not in st.session_state:
+        st.session_state.user = None
+    if "role" not in st.session_state:
+        st.session_state.role = None
+    if "backup_done_this_session" not in st.session_state:
+        st.session_state.backup_done_this_session = False
+        # Crear respaldo automático al iniciar (solo una vez por sesión)
+        if not st.session_state.backup_done_this_session:
+            auto_backup_on_startup()
+            st.session_state.backup_done_this_session = True
+
+ensure_session_state()
+
+def sidebar_filters():
+    st.sidebar.header("Filtros")
+    hoy = date.today()
+    fdesde = st.sidebar.date_input(
+        "Desde", value=st.session_state.filters.get("fecha_desde", hoy.replace(day=1)), key="flt_desde"
+    )
+    fhasta = st.sidebar.date_input("Hasta", value=st.session_state.filters.get("fecha_hasta", hoy), key="flt_hasta")
+
+    progs = DATA.list_programas()
+    prog_map = {r["nombre"]: int(r["id"]) for _, r in progs.iterrows()} if not progs.empty else {}
+    psel = st.sidebar.selectbox("Programa", options=["(Todos)"] + list(prog_map.keys()), key="flt_programa")
+    pid = prog_map.get(psel)
+
+    conv = DATA.list_convenios(pid) if pid else DATA.list_convenios()
+    conv_map = {r["nombre"]: int(r["id"]) for _, r in conv.iterrows()} if not conv.empty else {}
+    csel = st.sidebar.selectbox("Convenio", options=["(Todos)"] + list(conv_map.keys()), key="flt_convenio")
+    cid = conv_map.get(csel)
+
+    prof = DATA.list_Profesionales(pid, cid)
+    prof_map = {r["nombre"]: int(r["id"]) for _, r in prof.iterrows()} if not prof.empty else {}
+    fsel = st.sidebar.selectbox("Profesional", options=["(Todos)"] + list(prof_map.keys()), key="flt_profesional")
+    fid = prof_map.get(fsel)
+
+    act = st.sidebar.selectbox("Actividad / plantilla", options=["(Todas)"] + ACTIVIDADES_PLANTILLAS, key="flt_actividad")
+
+    st.session_state.filters = {
+        "fecha_desde": fdesde,
+        "fecha_hasta": fhasta,
+        "programa_id": pid,
+        "convenio_id": cid,
+        "Profesional_id": fid,
+        "actividad": (None if act == "(Todas)" else act),
+    }
+
+def render_login():
+    with st.sidebar:
+        # Botón de reconexión de emergencia
+        if st.button("🔄 Reconectar BD", help="Usar si los datos no aparecen", use_container_width=True):
+            global SQLITE_CONN, DATA
+            try:
+                SQLITE_CONN.close()
+            except:
+                pass
+            SQLITE_CONN = get_db_connection()
+            DATA = DataAccess(SQLITE_CONN)
+            success_toast("Base de datos reconectada")
+            st.rerun()
+        
+        st.markdown("---")
+        
+        if st.session_state.user:
+            st.success(f"Sesión: {st.session_state.user} ({st.session_state.role})")
+            if st.button("Cerrar sesión", key="login_logout", use_container_width=True):
+                st.session_state.user = None
+                st.session_state.role = None
+                st.rerun()
+        else:
+            st.markdown("### Iniciar sesión")
+            u = st.text_input("Usuario", key="login_user")
+            p = st.text_input("Contraseña", type="password", key="login_pass")
+            if st.button("Ingresar", key="login_btn", use_container_width=True):
+                user = USERS.get(u)
+                if user and p == user["password"]:
+                    st.session_state.user = u
+                    st.session_state.role = user["role"]
+                    success_toast("Ingreso exitoso.")
+                    st.rerun()
+                else:
+                    error_toast("Usuario o contraseña incorrectos.")
+
+# ---------------- CARGA MASIVA DE ATENCIONES (helper) ----------------
+def plantilla_atenciones_df() -> pd.DataFrame:
+    cols = [
+        "fecha",
+        "programa",
+        "convenio",
+        "institucion",
+        "departamento",
+        "municipio",
+        "localidad",
+        "profesional",
+        "documento",
+        "nombre",
+        "actividad",
+        "atendido",
+        "registrado_panacea",
+        "paciente_creado_panacea",
+        "paciente_priorizado",
+        "priorizado_origen",
+        "tipo_contacto",
+        "duracion_minutos",
+        "observaciones",
+        "sexo",
+        "fecha_nacimiento",
+        "telefono",
+        "email",
+        "direccion",
+        "zona",
+    ]
+    return pd.DataFrame(columns=cols)
+
+def parse_fecha(value) -> str:
+    if pd.isna(value) or value is None:
+        return date.today().strftime("%Y-%m-%d")
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%Y-%m-%d")
+    s = str(value).strip().replace("/", "-")
+    try:
+        return pd.to_datetime(s, dayfirst=True, errors="coerce").strftime("%Y-%m-%d")
+    except Exception:
+        return date.today().strftime("%Y-%m-%d")
+
+def procesar_atenciones_masivo(df: pd.DataFrame, auth_user: str) -> Tuple[int, List[str]]:
+    df = normalize_columns(df.copy())
+    req = {"fecha", "programa", "convenio", "institucion", "profesional", "documento", "nombre", "actividad"}
+    missing = req - set(df.columns)
+    if missing:
+        raise ValueError(f"Faltan columnas obligatorias: {sorted(list(missing))}")
+
+    ok = 0
+    errores: List[str] = []
+    for idx, r in df.iterrows():
+        try:
+            fecha = parse_fecha(r.get("fecha"))
+            p_name = str(r.get("programa") or "").strip()
+            c_name = str(r.get("convenio") or "").strip()
+            if not p_name or not c_name:
+                raise ValueError("Programa y convenio son obligatorios")
+            pid = DATA.programa_id_by_name(p_name) or DATA.upsert_programa(p_name)
+            cid = DATA.convenio_id_by_name(c_name, pid) or DATA.upsert_convenio(c_name, pid)
+
+            i_name = str(r.get("institucion") or "").strip()
+            dep = str(r.get("departamento") or "").strip() or None
+            mun = str(r.get("municipio") or "").strip() or None
+            loc = str(r.get("localidad") or "").strip() or None
+            if not i_name:
+                raise ValueError("Institución es obligatoria")
+            iid = DATA.institucion_id_by_name_geo(i_name, mun, dep) or DATA.upsert_institucion(i_name, loc, mun, dep)
+            inst_row = SQLITE_CONN.execute("SELECT * FROM instituciones WHERE id=?", (iid,)).fetchone()
+            localidad_val = inst_row["localidad"]
+            municipio_val = inst_row["municipio"]
+            departamento_val = inst_row["departamento"]
+
+            f_name = str(r.get("profesional") or "").strip()
+            if not f_name:
+                raise ValueError("Profesional es obligatorio")
+            fid = DATA.Profesional_id_by_name(f_name, pid, cid) or DATA.upsert_Profesional(f_name, None, None, pid, cid, None)
+
+            doc = str(r.get("documento") or "").strip()
+            nom = str(r.get("nombre") or "").strip()
+            if not doc or not nom:
+                raise ValueError("Documento y nombre del paciente son obligatorios")
+            pac_id = DATA.upsert_paciente(
+                numero_documento=doc,
+                nombre=nom,
+                fecha_nacimiento=str(r.get("fecha_nacimiento")) if pd.notna(r.get("fecha_nacimiento")) else None,
+                sexo=str(r.get("sexo")).strip() if pd.notna(r.get("sexo")) else None,
+                telefono=str(r.get("telefono")).strip() if pd.notna(r.get("telefono")) else None,
+                email=str(r.get("email")).strip() if pd.notna(r.get("email")) else None,
+                direccion=str(r.get("direccion")).strip() if pd.notna(r.get("direccion")) else None,
+                localidad=None,
+                municipio=None,
+                departamento=None,
+                zona=str(r.get("zona")).strip() if pd.notna(r.get("zona")) else None,
+            )
+
+            actividad = str(r.get("actividad") or "").strip() or ACTIVIDADES_PLANTILLAS[0]
+            atendido = bool(str2bool(r.get("atendido")))
+
+            reg_field_att = next(
+                (
+                    c
+                    for c in [
+                        "registrado_panacea",
+                        "atencion_en_panacea",
+                        "atencion_registrada_panacea",
+                        "en_panacea",
+                    ]
+                    if c in df.columns
+                ),
+                None,
+            )
+            registrado_panacea = bool(str2bool(r.get(reg_field_att))) if reg_field_att else False
+
+            reg_field_pac = next(
+                (
+                    c
+                    for c in [
+                        "paciente_creado_panacea",
+                        "paciente_en_panacea",
+                        "creado_panacea",
+                        "paciente_creado",
+                    ]
+                    if c in df.columns
+                ),
+                None,
+            )
+            paciente_creado_panacea = bool(str2bool(r.get(reg_field_pac))) if reg_field_pac else False
+
+            paciente_priorizado = bool(str2bool(r.get("paciente_priorizado"))) if "paciente_priorizado" in df.columns else False
+            priorizado_origen = None
+            if paciente_priorizado:
+                priorizado_origen = str(r.get("priorizado_origen")).strip() if pd.notna(r.get("priorizado_origen")) else None
+                if priorizado_origen == "":
+                    priorizado_origen = None
+
+            tipo_contacto = str(r.get("tipo_contacto")).strip() if pd.notna(r.get("tipo_contacto")) else None
+            if tipo_contacto in ("", "(no especifica)", "no especifica"):
+                tipo_contacto = None
+            duracion = safe_int(r.get("duracion_minutos"))
+
+            DATA.insert_registro(
+                fecha=fecha,
+                programa_id=pid,
+                convenio_id=cid,
+                institucion_id=iid,
+                Profesional_id=fid,
+                paciente_id=pac_id,
+                localidad=localidad_val,
+                municipio=municipio_val,
+                departamento=departamento_val,
+                numero_paciente=doc,
+                nombre_paciente=nom,
+                actividad=actividad,
+                atendido=atendido,
+                registrado_panacea=registrado_panacea,
+                paciente_creado_panacea=paciente_creado_panacea,
+                paciente_priorizado=paciente_priorizado,
+                priorizado_origen=priorizado_origen,
+                duracion_minutos=duracion,
+                tipo_contacto=tipo_contacto,
+                observaciones=(str(r.get("observaciones")).strip() if pd.notna(r.get("observaciones")) else None),
+                creado_por=auth_user,
+            )
+            ok += 1
+        except Exception as e:
+            errores.append(f"Fila {idx+2}: {e}")
+    return ok, errores
 
 # ---------------- UI: REGISTRAR ATENCION ----------------
 def ui_cargar_datos(auth_user: Optional[str]):
@@ -605,6 +2054,7 @@ def ui_reportes():
     r2.metric("Viáticos", len(df_viaticos))
     r3.metric("Eventos agenda", len(df_agenda))
     r4.metric("Solicitudes papel.", len(df_papeleria))
+
 
 # ---------------- UI: VIATICOS (MEJORADO) ----------------
 def ui_viaticos(auth_user: Optional[str]):
@@ -1994,6 +3444,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
