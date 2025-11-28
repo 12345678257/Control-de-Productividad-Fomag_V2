@@ -7,6 +7,9 @@ import re
 import zipfile
 import unicodedata
 import sqlite3
+import traceback
+import time
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -175,13 +178,17 @@ def safe_int(x) -> Optional[int]:
         return None
 
 # ---------------- DB ----------------
-def get_sqlite_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_SQLITE_PATH, check_same_thread=False)
+def get_db_connection() -> sqlite3.Connection:
+    """Obtiene una conexión fresca a la base de datos"""
+    if os.path.exists(DB_SQLITE_PATH):
+        conn = sqlite3.connect(DB_SQLITE_PATH, check_same_thread=False, timeout=10)
+    else:
+        conn = sqlite3.connect(DB_SQLITE_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
-SQLITE_CONN = get_sqlite_conn()
+SQLITE_CONN = get_db_connection()
 
 SQLITE_DDL = {
     "programas": """
@@ -1066,6 +1073,20 @@ def sidebar_filters():
 
 def render_login():
     with st.sidebar:
+        # Botón de reconexión de emergencia
+        if st.button("🔄 Reconectar BD", help="Usar si los datos no aparecen", use_container_width=True):
+            global SQLITE_CONN, DATA
+            try:
+                SQLITE_CONN.close()
+            except:
+                pass
+            SQLITE_CONN = get_db_connection()
+            DATA = DataAccess(SQLITE_CONN)
+            success_toast("Base de datos reconectada")
+            st.rerun()
+        
+        st.markdown("---")
+        
         if st.session_state.user:
             st.success(f"Sesión: {st.session_state.user} ({st.session_state.role})")
             if st.button("Cerrar sesión", key="login_logout", use_container_width=True):
@@ -2239,7 +2260,7 @@ def ui_papeleria(auth_user: Optional[str]):
                 except Exception as e:
                     error_toast(f"No se pudo actualizar: {e}")
 
-# ---------------- UI: CONFIGURACION (SECCIÓN INSTITUCIONES CORREGIDA) ----------------
+# ---------------- UI: CONFIGURACION (CON EDICIÓN EN PROGRAMAS Y CONVENIOS) ----------------
 def ui_configuracion():
     st.subheader("Configuración de catálogos")
     tabs = st.tabs(["Programas", "Convenios", "Instituciones", "Profesionales", "Pacientes"])
@@ -2260,6 +2281,80 @@ def ui_configuracion():
         st.markdown("#### Programas existentes")
         df_prog = DATA.list_programas()
         st.dataframe(df_prog, use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        st.markdown("#### ✏️ Editar / Eliminar programa")
+        
+        # Inicializar estado de edición
+        if "editing_prog_id" not in st.session_state:
+            st.session_state.editing_prog_id = None
+        if "editing_prog_data" not in st.session_state:
+            st.session_state.editing_prog_data = {}
+        
+        # Controles para cargar y eliminar
+        p1, p2, p3 = st.columns([1, 1, 1])
+        pid_edit = p1.number_input("ID programa", min_value=1, step=1, key="cfg_prog_edit_id")
+        cargar_prog = p2.button("📋 Cargar", use_container_width=True, key="cfg_prog_cargar")
+        eliminar_prog = p3.button("🗑️ Eliminar", use_container_width=True, key="cfg_prog_eliminar")
+        
+        # Eliminar
+        if eliminar_prog:
+            try:
+                DATA.delete_programa(int(pid_edit))
+                success_toast("Programa desactivado.")
+                st.session_state.editing_prog_id = None
+                st.session_state.editing_prog_data = {}
+                st.rerun()
+            except Exception as e:
+                error_toast(f"Error: {e}")
+        
+        # Cargar datos para edición
+        if cargar_prog:
+            prog_rec = DATA.get_programa_by_id(int(pid_edit))
+            if not prog_rec:
+                warn_toast("No existe programa con ese ID.")
+                st.session_state.editing_prog_id = None
+                st.session_state.editing_prog_data = {}
+            else:
+                st.session_state.editing_prog_id = prog_rec["id"]
+                st.session_state.editing_prog_data = {
+                    "nombre": prog_rec["nombre"]
+                }
+                st.rerun()
+        
+        # Mostrar formulario de edición
+        if st.session_state.editing_prog_id is not None:
+            st.markdown("---")
+            st.success(f"📝 **Editando programa ID: {st.session_state.editing_prog_id}**")
+            
+            with st.form(key="form_edit_prog", clear_on_submit=False):
+                new_nom = st.text_input(
+                    "Nombre *", 
+                    value=st.session_state.editing_prog_data["nombre"],
+                    key="form_edit_prog_nom"
+                )
+                
+                col_save, col_cancel = st.columns([1, 1])
+                submit = col_save.form_submit_button("💾 Actualizar", type="primary", use_container_width=True)
+                cancel = col_cancel.form_submit_button("❌ Cancelar", use_container_width=True)
+            
+            if submit:
+                if not new_nom.strip():
+                    error_toast("El nombre es obligatorio")
+                else:
+                    try:
+                        DATA.update_programa(st.session_state.editing_prog_id, new_nom.strip())
+                        success_toast("✅ Programa actualizado correctamente")
+                        st.session_state.editing_prog_id = None
+                        st.session_state.editing_prog_data = {}
+                        st.rerun()
+                    except Exception as e:
+                        error_toast(f"Error al actualizar: {e}")
+            
+            if cancel:
+                st.session_state.editing_prog_id = None
+                st.session_state.editing_prog_data = {}
+                st.rerun()
 
     # ==================== CONVENIOS ====================
     with tabs[1]:
@@ -2280,6 +2375,100 @@ def ui_configuracion():
         st.markdown("#### Convenios existentes")
         df_conv = DATA.list_convenios()
         st.dataframe(df_conv, use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        st.markdown("#### ✏️ Editar / Eliminar convenio")
+        
+        # Inicializar estado de edición
+        if "editing_conv_id" not in st.session_state:
+            st.session_state.editing_conv_id = None
+        if "editing_conv_data" not in st.session_state:
+            st.session_state.editing_conv_data = {}
+        
+        # Controles para cargar y eliminar
+        cv1, cv2, cv3 = st.columns([1, 1, 1])
+        cid_edit = cv1.number_input("ID convenio", min_value=1, step=1, key="cfg_conv_edit_id")
+        cargar_conv = cv2.button("📋 Cargar", use_container_width=True, key="cfg_conv_cargar")
+        eliminar_conv = cv3.button("🗑️ Eliminar", use_container_width=True, key="cfg_conv_eliminar")
+        
+        # Eliminar
+        if eliminar_conv:
+            try:
+                DATA.delete_convenio(int(cid_edit))
+                success_toast("Convenio desactivado.")
+                st.session_state.editing_conv_id = None
+                st.session_state.editing_conv_data = {}
+                st.rerun()
+            except Exception as e:
+                error_toast(f"Error: {e}")
+        
+        # Cargar datos para edición
+        if cargar_conv:
+            conv_rec = DATA.get_convenio_by_id(int(cid_edit))
+            if not conv_rec:
+                warn_toast("No existe convenio con ese ID.")
+                st.session_state.editing_conv_id = None
+                st.session_state.editing_conv_data = {}
+            else:
+                st.session_state.editing_conv_id = conv_rec["id"]
+                st.session_state.editing_conv_data = {
+                    "nombre": conv_rec["nombre"],
+                    "programa_id": conv_rec["programa_id"]
+                }
+                st.rerun()
+        
+        # Mostrar formulario de edición
+        if st.session_state.editing_conv_id is not None:
+            st.markdown("---")
+            st.success(f"📝 **Editando convenio ID: {st.session_state.editing_conv_id}**")
+            
+            with st.form(key="form_edit_conv", clear_on_submit=False):
+                # Obtener lista de programas actualizada
+                progs_edit = DATA.list_programas()
+                prog_map_edit = {r["nombre"]: int(r["id"]) for _, r in progs_edit.iterrows()} if not progs_edit.empty else {}
+                prog_reverse_map = {v: k for k, v in prog_map_edit.items()}
+                
+                current_prog_name = prog_reverse_map.get(st.session_state.editing_conv_data["programa_id"], "")
+                
+                cve1, cve2 = st.columns([1, 1])
+                new_prog = cve1.selectbox(
+                    "Programa *",
+                    options=list(prog_map_edit.keys()),
+                    index=list(prog_map_edit.keys()).index(current_prog_name) if current_prog_name in prog_map_edit.keys() else 0,
+                    key="form_edit_conv_prog"
+                )
+                
+                new_nom = cve2.text_input(
+                    "Nombre *", 
+                    value=st.session_state.editing_conv_data["nombre"],
+                    key="form_edit_conv_nom"
+                )
+                
+                col_save, col_cancel = st.columns([1, 1])
+                submit = col_save.form_submit_button("💾 Actualizar", type="primary", use_container_width=True)
+                cancel = col_cancel.form_submit_button("❌ Cancelar", use_container_width=True)
+            
+            if submit:
+                if not new_nom.strip() or not new_prog:
+                    error_toast("El nombre y programa son obligatorios")
+                else:
+                    try:
+                        DATA.update_convenio(
+                            st.session_state.editing_conv_id, 
+                            new_nom.strip(),
+                            prog_map_edit[new_prog]
+                        )
+                        success_toast("✅ Convenio actualizado correctamente")
+                        st.session_state.editing_conv_id = None
+                        st.session_state.editing_conv_data = {}
+                        st.rerun()
+                    except Exception as e:
+                        error_toast(f"Error al actualizar: {e}")
+            
+            if cancel:
+                st.session_state.editing_conv_id = None
+                st.session_state.editing_conv_data = {}
+                st.rerun()
 
     # ==================== INSTITUCIONES ====================
     with tabs[2]:
@@ -2868,7 +3057,7 @@ def ui_configuracion():
             except Exception as e:
                 st.error(f"Error procesando pacientes: {e}")
 
-# ---------------- UI: RESPALDO ----------------
+# ---------------- UI: RESPALDO (MEJORADO CON RESTAURACIÓN) ----------------
 def ui_respaldo():
     st.subheader("Respaldo de la base de datos")
     st.caption("Descarga la base SQLite actual y/o un ZIP con CSV y schema.sql.")
@@ -2894,6 +3083,51 @@ def ui_respaldo():
         use_container_width=True,
         key="bk_btn_zip",
     )
+
+    st.markdown("---")
+    st.markdown("### 📤 Restaurar desde respaldo")
+    
+    uploaded_db = st.file_uploader(
+        "Cargar archivo .db de respaldo", 
+        type=["db"], 
+        key="restore_db_file"
+    )
+    
+    if uploaded_db is not None:
+        st.warning("⚠️ Esto sobrescribirá la base de datos actual")
+        
+        if st.button("Restaurar base de datos", type="primary", key="restore_btn"):
+            try:
+                global SQLITE_CONN, DATA
+                
+                # Cerrar conexión
+                try:
+                    SQLITE_CONN.close()
+                except:
+                    pass
+                
+                # Guardar respaldo actual por si acaso
+                if os.path.exists(DB_SQLITE_PATH):
+                    backup_name = f"{DB_SQLITE_PATH}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    shutil.copy2(DB_SQLITE_PATH, backup_name)
+                    st.info(f"Respaldo automático creado: {backup_name}")
+                
+                # Escribir archivo subido
+                with open(DB_SQLITE_PATH, "wb") as f:
+                    f.write(uploaded_db.getvalue())
+                
+                # Reconectar
+                SQLITE_CONN = get_db_connection()
+                DATA = DataAccess(SQLITE_CONN)
+                
+                # Verificar
+                count = SQLITE_CONN.execute("SELECT COUNT(*) FROM registros").fetchone()[0]
+                success_toast(f"✅ Base restaurada correctamente. {count} registros encontrados.")
+                st.rerun()
+                
+            except Exception as e:
+                error_toast(f"Error restaurando: {e}")
+                st.code(traceback.format_exc())
 
     st.markdown("---")
     with st.expander("⚠️ Reiniciar base (acción destructiva)", expanded=False):
@@ -2923,36 +3157,81 @@ def _reset_database(method: str):
     global SQLITE_CONN, DATA
     try:
         if method == "vaciar":
-            with SQLITE_CONN:
-                SQLITE_CONN.execute("PRAGMA foreign_keys=OFF;")
-                for t in ["registros","viaticos","agenda","papeleria",
-                          "Profesionales","pacientes","instituciones","convenios","programas"]:
-                    try:
-                        SQLITE_CONN.execute(f"DELETE FROM {t};")
-                    except Exception:
-                        pass
+            # Cerrar conexión actual
+            try:
+                SQLITE_CONN.close()
+            except:
+                pass
+            
+            # Reconectar y vaciar
+            SQLITE_CONN = sqlite3.connect(DB_SQLITE_PATH, check_same_thread=False)
+            SQLITE_CONN.execute("PRAGMA foreign_keys=OFF;")
+            
+            tablas = ["registros", "viaticos", "agenda", "papeleria",
+                     "Profesionales", "pacientes", "instituciones", "convenios", "programas"]
+            
+            for t in tablas:
+                try:
+                    SQLITE_CONN.execute(f"DELETE FROM {t};")
+                    st.write(f"✓ Tabla {t} vaciada")
+                except Exception as e:
+                    st.warning(f"⚠ Error en {t}: {e}")
+            
+            try:
                 SQLITE_CONN.execute("DELETE FROM sqlite_sequence;")
-                SQLITE_CONN.execute("PRAGMA foreign_keys=ON;")
+            except:
+                pass
+            
+            SQLITE_CONN.execute("PRAGMA foreign_keys=ON;")
             SQLITE_CONN.commit()
+            
+            # Recrear esquema
+            ensure_sqlite_schema()
+            
         elif method == "borrar_archivo":
             try:
                 SQLITE_CONN.close()
-            except Exception:
+            except:
                 pass
+            
             if os.path.exists(DB_SQLITE_PATH):
                 os.remove(DB_SQLITE_PATH)
-            SQLITE_CONN = get_sqlite_conn()
-            ensure_sqlite_schema()
-            DATA = DataAccess(SQLITE_CONN)
+                st.write(f"✓ Archivo {DB_SQLITE_PATH} eliminado")
+            
+            # Esperar un momento
+            time.sleep(0.5)
+        
+        # Reconectar
+        SQLITE_CONN = get_db_connection()
+        ensure_sqlite_schema()
+        DATA = DataAccess(SQLITE_CONN)
+        
+        return True
+        
     except Exception as e:
         st.error(f"Error al reiniciar: {e}")
+        st.code(traceback.format_exc())
         return False
-    return True
 
 # ---------------- MAIN ----------------
 def main():
     st.markdown(f"# {APP_ICON} {APP_TITLE}")
     st.caption("Base SQLite local (`productividad_Profesionales.db`). Usuarios del mismo enlace comparten la misma información.")
+    
+    # DIAGNÓSTICO
+    if st.sidebar.checkbox("🔍 Mostrar diagnóstico", value=False):
+        st.sidebar.markdown("### Diagnóstico de BD")
+        db_exists = os.path.exists(DB_SQLITE_PATH)
+        st.sidebar.write(f"Archivo existe: {db_exists}")
+        if db_exists:
+            db_size = os.path.getsize(DB_SQLITE_PATH)
+            st.sidebar.write(f"Tamaño: {db_size:,} bytes")
+            try:
+                count = SQLITE_CONN.execute("SELECT COUNT(*) FROM registros").fetchone()[0]
+                st.sidebar.write(f"Registros en BD: {count}")
+            except Exception as e:
+                st.sidebar.error(f"Error leyendo BD: {e}")
+    
     sidebar_filters()
     render_login()
 
@@ -3010,4 +3289,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
