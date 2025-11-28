@@ -1442,7 +1442,6 @@ def ensure_session_state():
         if not st.session_state.backup_done_this_session:
             auto_backup_on_startup()
             st.session_state.backup_done_this_session = True
-```
 
 ## 📝 Instrucciones de Uso:
 
@@ -3727,5 +3726,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
