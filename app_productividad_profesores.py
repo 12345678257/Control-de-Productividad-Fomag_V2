@@ -1462,36 +1462,7 @@ def ensure_session_state():
 
 ## 🎯 Características del Sistema:
 
-✅ **Respaldos Automáticos:**
-- Al iniciar la app (cada hora)
-- Antes de restauraciones
-- Antes de reiniciar la BD
 
-✅ **Puntos de Restauración:**
-- Lista cronológica de todos los respaldos
-- Restaurar a cualquier punto en el tiempo
-- Descarga individual de respaldos
-
-✅ **Seguridad:**
-- Respaldo automático antes de operaciones destructivas
-- Mantiene un respaldo de seguridad al restaurar
-- Limpieza automática de respaldos antiguos
-
-✅ **Múltiples Formatos:**
-- .db (SQLite completo)
-- .zip (DB + CSV + schema)
-- .json (Datos portables)
-
-## 📁 Estructura de Respaldos:
-```
-tu_proyecto/
-├── app_productividad_Profesionales.py
-├── productividad_Profesionales.db  ← Base de datos actual
-└── respaldos_automaticos/           ← Carpeta de respaldos
-    ├── backup_auto_startup_20250128_080000.db
-    ├── backup_manual_20250128_100000.db
-    ├── backup_before_restore_20250128_120000.db
-    └── ...
 
 # ---------------- ESTADO / LOGIN ----------------
 def ensure_session_state():
@@ -3756,4 +3727,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
